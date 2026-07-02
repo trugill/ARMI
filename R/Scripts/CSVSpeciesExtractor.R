@@ -15,7 +15,19 @@ CSVSpeciesExtractor$processCSVFile <- function(input_file_path, is_temp = FALSE)
   }, error = function(e) stop("Error reading file: ", e$message))
   
   col_names <- tolower(names(data))
-  species_col <- which(grepl("species", col_names))[1]
+  
+  # Prefer an exact "species" column; fall back to a substring match that
+  # explicitly excludes numeric *Key columns (e.g. "speciesKey", "taxonKey"),
+  # which would otherwise get picked up by a plain grepl("species", ...) and
+  # silently turn every species name into a GBIF taxon ID.
+  species_col <- which(col_names == "species")[1]
+  if (is.na(species_col)) {
+    species_col <- which(grepl("species", col_names) & !grepl("key", col_names))[1]
+  }
+  if (is.na(species_col)) {
+    species_col <- which(col_names == "scientificname")[1]
+  }
+  
   lat_col <- which(grepl("decimallatitude|latitude", col_names))[1]
   lon_col <- which(grepl("decimallongitude|longitude", col_names))[1]
   
@@ -40,8 +52,8 @@ CSVSpeciesExtractor$processCSVFile <- function(input_file_path, is_temp = FALSE)
   for (sp in species_names) {
     clean_name <- gsub("[^a-zA-Z0-9]", "_", sp)
     sp_rows <- data[data[[species_col]] == sp & 
-                    !is.na(data[[lat_col]]) & 
-                    !is.na(data[[lon_col]]), ]
+                      !is.na(data[[lat_col]]) & 
+                      !is.na(data[[lon_col]]), ]
     if (nrow(sp_rows) == 0) next
     
     out_df <- data.frame(
@@ -61,4 +73,3 @@ CSVSpeciesExtractor$processCSVFile <- function(input_file_path, is_temp = FALSE)
   
   return(last_output)
 }
-

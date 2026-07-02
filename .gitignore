@@ -1,0 +1,21 @@
+# Ignore contents of data folder, but keep the folder
+ASC/*
+!ASC/.gitkeep
+
+# Ignore contents of Models folder, but keep the folder
+output/*
+!output/.gitkeep
+
+# Raw licensed datasets
+EnvironmentalLayers/
+!EnvironmentalLayers/.gitkeep
+
+# Generated outputs
+bin/
+!bin/.gitkeep
+
+TIF/
+!TIF/.gitkeep
+
+SHP/
+!SHP/.gitkeep

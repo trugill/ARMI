@@ -1,0 +1,98 @@
+{
+  "_comment": "ARMI Default Configuration",
+  "_version": "1.0.0",
+  "paths": {
+    "main_path": "D:/GithubProjects/ARMIGithub",
+    "maxent_jar": "bin/maxent.jar"
+  },
+  "species": {
+    "species_list": "Rhacodactylus leachianus",
+    "use_raw_gbif": true,
+    "trim_occurrences": true,
+    "species_auto": "Rhacodactylus leachianus",
+    "species_manual": [],
+    "download_mode": "automatic",
+    "use_iucn_range": true
+  },
+  "data_sources": {
+    "download_worldclim": false,
+    "download_spectre": false,
+    "download_landcover": false,
+    "download_footprint": false,
+    "use_custom_layers": false,
+    "download_gbif": true,
+    "extract_iucn_range": true,
+    "override_existing": false,
+    "active_layer_dirs": ["Custom", "WorldClim"]
+  },
+  "gbif": {
+    "max_records": 100000,
+    "page_size": 300,
+    "min_confidence": 90
+  },
+  "resolution": {
+    "mode": "auto",
+    "target_arcmin": 6,
+    "user_template_use_extent": true,
+    "auto_align": true
+  },
+  "extent": {
+    "clip_to_extent": false,
+    "min_lon": -180,
+    "max_lon": 180,
+    "min_lat": -90,
+    "max_lat": 90,
+    "clipping_strategy": "iucn_range"
+  },
+  "mask": {
+    "use_mask": true,
+    "min_lon": 35,
+    "max_lon": 53,
+    "min_lat": 35,
+    "max_lat": 50
+  },
+  "model_parameters": {
+    "perm_importance_threshold": 0.05,
+    "top_variable_count": 10,
+    "correlation_threshold": 0.8,
+    "selection_criterion": "AICc",
+    "max_combo_size": 7
+  },
+  "beta_optimization": {
+    "min": 1,
+    "max": 5,
+    "step": 0.5
+  },
+  "final_model": {
+    "replicates": 10,
+    "replicate_type": "crossvalidate",
+    "projection_layers": []
+  },
+  "cleanup": {
+    "use_shp": true,
+    "keep_clipped_layers": true,
+    "keep_clipped_mask": true
+  },
+  "steps_enabled": {
+    "step0_download": true,
+    "step1_gbif": true,
+    "step2_clip_shp": true,
+    "step3_trim_duplicates": true,
+    "step4_clip_rasters": true,
+    "step5_clip_mask": true,
+    "step6_global_model": true,
+    "step7_top_variables": true,
+    "step8_correlation": true,
+    "step9_permutations": true,
+    "step10_run_all": true,
+    "step11_best_model": true,
+    "step12_optimize_beta": true,
+    "step13_final_model": true
+  },
+  "advanced": {
+    "java_memory_mb": 2048,
+    "skip_existing_models": true,
+    "required_tifs": [],
+    "required_bioclim": []
+  }
+}

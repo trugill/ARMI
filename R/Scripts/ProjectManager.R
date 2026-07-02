@@ -6,6 +6,56 @@ ProjectManager <- new.env()
 ProjectManager$bestVariables <- NULL
 ProjectManager$bestMultiplier <- 1.0
 
+# =============================================================================
+# WorkflowConfiguration - constructor for the master config object
+# =============================================================================
+WorkflowConfiguration <- function() {
+  list(
+    step0  = NULL,
+    step1  = NULL,
+    step3  = NULL,
+    step4  = NULL,
+    step6  = NULL,
+    step7  = NULL,
+    step8  = NULL,
+    step9  = NULL,
+    step10 = NULL,
+    step11 = NULL,
+    step12 = NULL,
+    step13 = NULL
+  )
+}
+
+# =============================================================================
+# WorkflowConfiguration_validate - sanity check each step config
+# =============================================================================
+WorkflowConfiguration_validate <- function(config) {
+  if (is.null(config) || !is.list(config)) {
+    stop("WorkflowConfiguration_validate: config must be a list")
+  }
+  
+  step_names <- c("step0", "step1", "step3", "step4", "step6",
+                  "step7", "step8", "step9", "step10", "step11",
+                  "step12", "step13")
+  
+  for (sn in step_names) {
+    step <- config[[sn]]
+    if (is.null(step)) next  # missing step is OK -- treated as disabled
+    
+    # Delegate to StepConfig's own validator (tolerant of missing $type)
+    if (exists("StepConfig") && is.function(StepConfig$validate)) {
+      tryCatch(
+        StepConfig$validate(step),
+        error = function(e) {
+          stop(sprintf("Validation failed for %s: %s", sn, e$message))
+        }
+      )
+    }
+  }
+  
+  return(TRUE)
+}
+
 ProjectManager$runMethodology <- function(config, progress_callback = NULL) {
   
   update_progress <- function(step, name) {
@@ -16,13 +66,167 @@ ProjectManager$runMethodology <- function(config, progress_callback = NULL) {
   
   WorkflowConfiguration_validate(config)
   
+  # Step 0 - Data download (environmental layers + GBIF)
+  if (!is.null(config$step0) && isTRUE(config$step0$enabled)) {
+    update_progress(0, "Downloading environmental data")
+    
+    if (isTRUE(config$step0$download_worldclim)) {
+      cat("  Downloading WorldClim...\n")
+      tryCatch(
+        DataDownloader$downloadWorldClim(config$step0$target_res_arcmin),
+        error = function(e) cat("  WorldClim skipped:", e$message, "\n")
+      )
+    }
+    if (isTRUE(config$step0$download_spectre)) {
+      cat("  Downloading SPECTRE...\n")
+      tryCatch(
+        DataDownloader$downloadSPECTRE(config$step0$target_res_arcmin),
+        error = function(e) cat("  SPECTRE skipped:", e$message, "\n")
+      )
+    }
+    if (isTRUE(config$step0$download_landcover)) {
+      cat("  Downloading Land Cover...\n")
+      tryCatch(
+        DataDownloader$downloadLandcover(config$step0$target_res_arcmin),
+        error = function(e) cat("  LandCover skipped:", e$message, "\n")
+      )
+    }
+    if (isTRUE(config$step0$download_footprint)) {
+      cat("  Downloading Human Footprint...\n")
+      tryCatch(
+        DataDownloader$downloadFootprint(config$step0$target_res_arcmin),
+        error = function(e) cat("  Footprint skipped:", e$message, "\n")
+      )
+    }
+    if (isTRUE(config$step0$use_custom_layers)) {
+      cat("  Processing custom layers (EnvironmentalLayers/custom)...\n")
+      tryCatch(
+        DataDownloader$processCustomLayers(config$step0$target_res_arcmin),
+        error = function(e) cat("  Custom layers skipped:", e$message, "\n")
+      )
+    }
+    
+    # Every layer above was resampled to the master template and written to
+    # TIF_DIR as it was downloaded. Now convert whatever landed in TIF_DIR
+    # to ASCII grids in ASC_DIR -- this is what Step 4 clips per species.
+    cat("  Converting resampled TIF layers to ASCII (TIF/ -> ASC/)...\n")
+    tryCatch(
+      DataDownloader$convertTifToAsc(),
+      error = function(e) cat("  TIF -> ASC conversion skipped:", e$message, "\n")
+    )
+    
+    # GBIF download + save as tab-delimited (raw GBIF format)
+    if (isTRUE(config$step0$download_gbif) &&
+        !is.null(config$step1) && nchar(config$step1$occurrence_file) > 0) {
+      
+      species_tag  <- config$step1$occurrence_file
+      species_name <- gsub("_", " ", species_tag)
+      
+      cat("  Downloading GBIF data for:", species_name, "\n")
+      
+      gbif_result <- tryCatch(
+        DataDownloader$downloadGBIF(
+          species_tag = species_name,
+          max_records = ConfigManager$current$gbif$max_records,
+          page_size   = ConfigManager$current$gbif$page_size
+        ),
+        error = function(e) {
+          cat("  GBIF download failed:", e$message, "\n")
+          NULL
+        }
+      )
+      
+      if (!is.null(gbif_result) &&
+          !is.null(gbif_result$data) &&
+          nrow(gbif_result$data) > 0) {
+        
+        species_dir <- file.path(MAIN_PATH, "output", species_tag, "CSV")
+        if (!dir.exists(species_dir)) dir.create(species_dir, recursive = TRUE)
+        csv_path <- file.path(species_dir, paste0(species_tag, ".csv"))
+        
+        df <- gbif_result$data
+        
+        if (!"species" %in% names(df)) {
+          if ("scientificName" %in% names(df)) df$species <- df$scientificName
+          else df$species <- gbif_result$taxon$matched_name %||% species_name
+        }
+        if (!"decimalLatitude" %in% names(df) && "latitude" %in% names(df)) {
+          df$decimalLatitude <- df$latitude
+        }
+        if (!"decimalLongitude" %in% names(df) && "longitude" %in% names(df)) {
+          df$decimalLongitude <- df$longitude
+        }
+        
+        tryCatch({
+          write.table(df, csv_path,
+                      sep = "\t", row.names = FALSE, quote = FALSE, na = "")
+          cat("  Saved", nrow(df), "records (tab-delimited) to:\n    ", csv_path, "\n")
+        }, error = function(e) {
+          cat("  Failed to save CSV:", e$message, "\n")
+        })
+        
+        # ---- Extract IUCN range polygon if requested ----
+        if (isTRUE(config$step0$extract_iucn_range)) {
+          shp_source_dir <- file.path(MAIN_PATH, "SHP", "IUCN")
+          out_shp_dir    <- file.path(MAIN_PATH, "output", species_tag, "SHP")
+          
+          if (dir.exists(shp_source_dir)) {
+            cat("  Extracting IUCN range polygon...\n")
+            
+            # gbif_result$taxon$group was set inside downloadGBIF
+            group <- gbif_result$taxon$group %||% NA_character_
+            match_name <- gbif_result$taxon$canonical_name %||%
+              gbif_result$taxon$matched_name  %||% species_name
+            
+            SHPExtractor$extractSpeciesRange(
+              species_tag    = species_tag,
+              sci_name       = match_name,
+              group          = group,
+              shp_source_dir = shp_source_dir,
+              out_shp_dir    = out_shp_dir
+            )
+          } else {
+            cat("  IUCN range extraction requested but source dir not found:\n")
+            cat("    ", shp_source_dir, "\n")
+          }
+        }
+        
+        
+        
+        
+      } else {
+        cat("  GBIF returned no records for", species_name, "\n")
+      }
+    }
+  }
+  
+  
   # Steps 1-2
   if (config$step1$enabled) {
     update_progress(1, "Loading location data")
-    species_file <- config$step1$occurrence_file
-    if (config$step1$use_raw_gbif) {
-      species_file <- CSVSpeciesExtractor$processCSVFile(species_file, FALSE)
+    
+    species_tag <- config$step1$occurrence_file  # e.g. "Chamaeleo_calyptratus"
+    
+    # Resolve to the full CSV path saved by Step 0
+    species_file <- file.path(MAIN_PATH, "output", species_tag, "CSV",
+                              paste0(species_tag, ".csv"))
+    
+    if (!file.exists(species_file)) {
+      stop("Occurrence CSV not found at: ", species_file,
+           "\n  (Did Step 0 GBIF download succeed? Or place a manual CSV there.)")
     }
+    
+    cat("  Using CSV:", species_file, "\n")
+    
+    if (config$step1$use_raw_gbif) {
+      # processCSVFile returns the path of the last written Species/*.csv
+      processed <- CSVSpeciesExtractor$processCSVFile(species_file, FALSE)
+      if (!is.null(processed) && is.character(processed) && file.exists(processed)) {
+        species_file <- processed
+        cat("  Processed species CSV:", species_file, "\n")
+      }
+    }
+    
     PathManager$initialize(species_file)
     
     if (config$step1$use_iucn_shp && nchar(config$step1$shp_path) > 0) {
@@ -46,17 +250,104 @@ ProjectManager$runMethodology <- function(config, progress_callback = NULL) {
   # Steps 4-5
   if (config$step4$enabled) {
     update_progress(4, "Defining spatial extent and clipping rasters")
-    if (config$step4$clip_to_extent) {
-      pts <- read.csv(PathManager$getSpeciesPath())
-      extent_array <- c(min(pts$longitude) - 1, max(pts$longitude) + 1,
-                        min(pts$latitude) - 1, max(pts$latitude) + 1)
-    } else {
-      extent_array <- c(config$step4$min_lon, config$step4$max_lon,
-                        config$step4$min_lat, config$step4$max_lat)
-    }
-    cat("  Extent:", paste(round(extent_array, 2), collapse = ", "), "\n")
-    RFunctions$clipRasters(extent_array = extent_array)
     
+    # Determine strategy
+    strategy <- if (isTRUE(config$step4$clip_to_extent)) "auto_extent"
+    else if (!is.null(config$step4$max_lat) && !is.na(config$step4$max_lat)) "manual_bbox"
+    else "iucn_range"
+    
+    # Read species points (needed for auto_extent & iucn_range fallback)
+    pts <- read.csv(PathManager$getSpeciesPath())
+    lon_col <- if ("longitude" %in% names(pts)) "longitude"
+    else if ("decimalLongitude" %in% names(pts)) "decimalLongitude" else NA
+    lat_col <- if ("latitude" %in% names(pts)) "latitude"
+    else if ("decimalLatitude" %in% names(pts)) "decimalLatitude" else NA
+    
+    point_extent <- function() {
+      if (is.na(lon_col) || is.na(lat_col)) {
+        stop("Could not find longitude/latitude columns in ",
+             PathManager$getSpeciesPath())
+      }
+      c(min(pts[[lon_col]], na.rm = TRUE) - 1,
+        max(pts[[lon_col]], na.rm = TRUE) + 1,
+        min(pts[[lat_col]], na.rm = TRUE) - 1,
+        max(pts[[lat_col]], na.rm = TRUE) + 1)
+    }
+    
+    extent_array <- if (strategy == "manual_bbox") {
+      c(config$step4$min_lon, config$step4$max_lon,
+        config$step4$min_lat, config$step4$max_lat)
+    } else if (strategy == "iucn_range") {
+      species_tag <- basename(dirname(PathManager$getCSVPath()))
+      range_shp <- file.path(MAIN_PATH, "output", species_tag, "SHP",
+                             paste0(species_tag, "_range.shp"))
+      
+      if (file.exists(range_shp)) {
+        shp_extent <- SHPExtractor$getExtentFromShapefile(range_shp, buffer_deg = 1.0)
+        if (!is.null(shp_extent)) {
+          cat("  Using extent from IUCN range shapefile:\n    ", range_shp, "\n")
+          shp_extent
+        } else {
+          cat("  IUCN shapefile exists but extent read failed -- falling back to point extent.\n")
+          point_extent()
+        }
+      } else {
+        cat("  No IUCN range shapefile at:\n    ", range_shp, "\n")
+        cat("  Falling back to point extent.\n")
+        point_extent()
+      }
+    } else {
+      # auto_extent
+      point_extent()
+    }
+    
+    cat("  Strategy:", strategy, "\n")
+    cat("  Extent:", paste(round(extent_array, 2), collapse = ", "), "\n")
+    
+    # ---- Resolve which folder to read layers from -------------------------
+    # Clip from ASC_DIR: the master, resampled-to-a-common-grid ASCII layers
+    # produced by Step 0 (raw downloads -> resample -> TIF/ -> ASC/). Clipping
+    # from raw EnvironmentalLayers would bypass the resampling step and risk
+    # mismatched grids across layers.
+    input_folder <- ASC_DIR
+    active_dirs <- ConfigManager$current$data_sources$active_layer_dirs
+    if (!is.null(active_dirs) && length(active_dirs) > 0) {
+      cat("  active_layer_dirs configured:", paste(active_dirs, collapse = ", "),
+          "(only applies to nested raw folders; ASC/ is flat)\n")
+    }
+    cat("  Using all layers in:", input_folder, "\n")
+    
+    if (!dir.exists(input_folder) || length(list.files(input_folder, pattern = "\\.asc$")) == 0) {
+      stop("No resampled ASCII layers found in: ", input_folder,
+           "\n  Run Step 0 first (download/resample layers -> TIF/ -> ASC/),",
+           "\n  or place a manual .tif under EnvironmentalLayers/custom and re-run Step 0.")
+    }
+    
+    # ---- Clip rasters to the species/training extent ----------------------
+    RFunctions$clipRasters(
+      input_folder = input_folder,
+      extent_array = extent_array,
+      output_folder = PathManager$getLayersPath()
+    )
+    
+    # ---- Clip rasters to the mask extent, for projection -------------------
+    if (isTRUE(config$step4$use_mask)) {
+      mask_extent <- c(config$step4$mask_min_lon, config$step4$mask_max_lon,
+                       config$step4$mask_min_lat, config$step4$mask_max_lat)
+      if (any(is.na(mask_extent))) {
+        cat("  use_mask is TRUE but mask_min/max_lat/lon are incomplete - skipping mask clip\n")
+      } else {
+        cat("  Clipping layers to mask extent (for projection) ->",
+            PathManager$getClippedMaskPath(), "\n")
+        RFunctions$clipRasters(
+          input_folder = input_folder,
+          extent_array = mask_extent,
+          output_folder = PathManager$getClippedMaskPath()
+        )
+      }
+    }
+    
+    # ---- Post-step-4 duplicate trimming ----------------------------------
     if (config$step3$enabled) {
       species_name <- tools::file_path_sans_ext(basename(PathManager$getSpeciesPath()))
       if (!grepl("trimmed", species_name)) {
@@ -73,8 +364,8 @@ ProjectManager$runMethodology <- function(config, progress_callback = NULL) {
     global_output <- file.path(PathManager$getModelsPath(), "Global")
     if (!dir.exists(global_output)) dir.create(global_output, recursive = TRUE)
     MaxentCaller$runMaxent(PathManager$getSpeciesPath(), 
-                            args = config$step6$extra_args,
-                            output_dir = global_output)
+                           args = config$step6$extra_args,
+                           output_dir = global_output)
     global_model_path <- file.path(global_output, "maxentResults.csv")
   }
   
@@ -133,7 +424,7 @@ ProjectManager$runMethodology <- function(config, progress_callback = NULL) {
       asc_file <- file.path(output_dir, paste0(species_name, ".asc"))
       lambdas_file <- file.path(output_dir, paste0(species_name, ".lambdas"))
       CSVPermutationAnalyzer$addToFirstEmptyRow(PathManager$getModelSelectionPath(),
-        c(PathManager$getSpeciesPath(), asc_file, lambdas_file))
+                                                c(PathManager$getSpeciesPath(), asc_file, lambdas_file))
     }
   }
   
@@ -173,7 +464,7 @@ ProjectManager$runMethodology <- function(config, progress_callback = NULL) {
       asc_file <- file.path(output_dir, paste0(species_name, ".asc"))
       lambdas_file <- file.path(output_dir, paste0(species_name, ".lambdas"))
       CSVPermutationAnalyzer$addToFirstEmptyRow(beta_csv,
-        c(PathManager$getSpeciesPath(), asc_file, lambdas_file))
+                                                c(PathManager$getSpeciesPath(), asc_file, lambdas_file))
     }
     
     beta_results_path <- file.path(PathManager$getCSVPath(), "betaResults.csv")
@@ -201,7 +492,16 @@ ProjectManager$runMethodology <- function(config, progress_callback = NULL) {
                     paste0("replicates=", config$step13$replicates),
                     "replicatetype=crossvalidate")
     
-    for (proj in config$step13$projection_layers) {
+    proj_layers <- config$step13$projection_layers
+    if (length(proj_layers) == 0 &&
+        dir.exists(PathManager$getClippedMaskPath()) &&
+        length(list.files(PathManager$getClippedMaskPath(), pattern = "\\.asc$")) > 0) {
+      cat("  No projection_layers configured - defaulting to ClippedMask/:",
+          PathManager$getClippedMaskPath(), "\n")
+      proj_layers <- PathManager$getClippedMaskPath()
+    }
+    
+    for (proj in proj_layers) {
       if (dir.exists(proj)) {
         final_args <- c(final_args, paste0("projectionlayers=", proj))
       }
@@ -214,4 +514,3 @@ ProjectManager$runMethodology <- function(config, progress_callback = NULL) {
   
   if (!is.null(progress_callback)) progress_callback(14, "Complete!")
 }
-

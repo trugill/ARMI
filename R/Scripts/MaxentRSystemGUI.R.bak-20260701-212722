@@ -5,9 +5,6 @@
 suppressPackageStartupMessages({
   library(shiny)
   library(shinyjs)
-
-# Null-coalescing operator
-`%||%` <- function(a, b) if (is.null(a)) b else a
 })
 
 # Null-coalescing operator
@@ -1092,9 +1089,6 @@ server <- function(input, output, session) {
       }
       
       selected_sources <- input$dl_sources %||% character(0)
-      cat("=== [2/4] Building workflow config ===\n"); flush.console()
-      config <- WorkflowConfiguration()
-
       
       config$step0 <- StepConfig$Step0Config(
         enabled            = has_step("step0"),

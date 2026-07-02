@@ -17,8 +17,8 @@ RFunctions <- new.env()
 
 # ---- TrimDupes ----
 RFunctions$trimDupes <- function(points_file_path = NULL, 
-                                  mask_file_path = NULL, 
-                                  output_file_path = NULL) {
+                                 mask_file_path = NULL, 
+                                 output_file_path = NULL) {
   if (is.null(points_file_path)) points_file_path <- PathManager$getSpeciesPath()
   
   if (is.null(mask_file_path)) {
@@ -42,13 +42,13 @@ RFunctions$trimDupes <- function(points_file_path = NULL,
   cat("Original number of points:", nrow(original_points), "\n")
   
   original_points_vect <- terra::vect(original_points, 
-                                       geom = c(original_col_names[3], 
-                                                original_col_names[2]))
+                                      geom = c(original_col_names[3], 
+                                               original_col_names[2]))
   mask_raster <- terra::rast(mask_file_path)
   
   if (has_enmtools) {
     trimmed_points <- ENMTools::trimdupes.by.raster(points = original_points_vect, 
-                                                     mask = mask_raster)
+                                                    mask = mask_raster)
   } else {
     cells <- terra::cells(mask_raster, original_points_vect)[, "cell"]
     keep_idx <- !duplicated(cells) & !is.na(cells)
@@ -70,7 +70,7 @@ RFunctions$trimDupes <- function(points_file_path = NULL,
 
 # ---- Correlation ----
 RFunctions$correlation <- function(maxent_result_path, threshold, count, 
-                                    species_path = NULL) {
+                                   species_path = NULL) {
   cat("Calculating correlation between top variables...\n")
   
   top_vars <- CSVPermutationAnalyzer$getTopPermutationImportance(
@@ -146,7 +146,7 @@ RFunctions$combos <- function(threshold = 0.8, csv_path = NULL, model_path = NUL
 
 # ---- Clip Rasters ----
 RFunctions$clipRasters <- function(input_folder = NULL, extent_array, 
-                                    output_folder = NULL) {
+                                   output_folder = NULL) {
   if (is.null(input_folder)) input_folder <- PathManager$getTifPath()
   if (is.null(output_folder)) output_folder <- PathManager$getLayersPath()
   
@@ -159,12 +159,32 @@ RFunctions$clipRasters <- function(input_folder = NULL, extent_array,
   if (left >= right || south >= north) stop("Invalid extent")
   if (!dir.exists(output_folder)) dir.create(output_folder, recursive = TRUE)
   
-  extensions <- c("\\.tif$", "\\.tiff$", "\\.img$", "\\.grd$", "\\.nc$")
+  extensions <- c("\\.tif$", "\\.tiff$", "\\.img$", "\\.grd$", "\\.nc$", "\\.asc$")
   raster_files <- c()
   for (ext in extensions) {
-    raster_files <- c(raster_files, 
-                      list.files(input_folder, pattern = ext, 
-                                 full.names = TRUE, ignore.case = TRUE))
+    raster_files <- c(raster_files, list.files(input_folder,
+                                               pattern = ext, full.names = TRUE, ignore.case = TRUE, recursive = TRUE))
+  }
+  
+  # Honor active_layer_dirs from config, if set: keep only files under those subfolders.
+  # NOTE: TIF_DIR/ASC_DIR are flat (no per-source subfolders) since layers land
+  # there after resampling, so this only has something to match against when
+  # clipping straight from a nested raw folder. If it matches nothing, don't
+  # silently zero out every raster -- just skip the filter.
+  active_dirs <- tryCatch(ConfigManager$current$data_sources$active_layer_dirs,
+                          error = function(e) NULL)
+  if (!is.null(active_dirs) && length(active_dirs) > 0) {
+    keep_patterns <- paste0("/", active_dirs, "/", collapse = "|")
+    # Normalize path separators for regex matching
+    norm_files <- gsub("\\\\", "/", raster_files)
+    matched <- raster_files[grepl(keep_patterns, norm_files)]
+    if (length(matched) > 0) {
+      raster_files <- matched
+      cat("Filtered to", length(raster_files), "files under active layer folders\n")
+    } else {
+      cat("  active_layer_dirs set but input folder is flat (", input_folder,
+          ") - ignoring subfolder filter, using all files found\n")
+    }
   }
   
   if (length(raster_files) == 0) stop("No raster files found")
@@ -260,7 +280,7 @@ RFunctions$read_lambdas <- function(lambdas_path) {
                        comment.char = "", quote = "", strip.white = TRUE)
   raw_data$V2_numeric <- suppressWarnings(as.numeric(raw_data$V2))
   metadata_keywords <- c("linearPredictorNormalizer", "densityNormalizer",
-                          "numBackgroundPoints", "entropy")
+                         "numBackgroundPoints", "entropy")
   is_metadata <- raw_data$V1 %in% metadata_keywords
   filtered <- raw_data[!is_metadata & !is.na(raw_data$V2_numeric), ]
   active <- filtered[filtered$V2_numeric != 0.0, ]
@@ -350,7 +370,7 @@ RFunctions$processModelSelection <- function(csv_path, output_path) {
   for (i in 1:nrow(input_data)) {
     cat("  Model", i, "of", nrow(input_data), "\n")
     res <- RFunctions$calculate_loglikelihood(input_data$datapoints_path[i],
-                                               input_data$raster_path[i])
+                                              input_data$raster_path[i])
     results$loglikelihood[i] <- res$loglikelihood
     results$sample_size[i] <- ifelse(is.null(res$sample_size), NA, res$sample_size)
     results$valid_points[i] <- ifelse(is.null(res$valid_points), NA, res$valid_points)
@@ -370,4 +390,3 @@ RFunctions$processModelSelection <- function(csv_path, output_path) {
   cat("Model selection saved to:", output_path, "\n")
   return(results)
 }
-
