@@ -223,6 +223,13 @@ DataDownloader$downloadFootprint <- function(target_res_arcmin = 5, year = 2009)
 }
 
 # ── SPECTRE download via WCS ────────────────────────────────────────────────
+# Each SPECTRE coverage is downloaded, resampled, and written to TIF_DIR as
+# its OWN single-layer file (mirroring downloadWorldClim below). We never
+# write the full multi-layer stack into TIF_DIR: if a combined multi-layer
+# TIF sits there alongside the per-layer files, every band gets picked up
+# twice by clipRasters()/convertTifToAsc() (once as part of the stack, once
+# as its own file), duplicating layers downstream. Any pre-existing combined
+# file from an older run is removed for the same reason.
 DataDownloader$downloadSPECTRE <- function(target_res_arcmin = 5) {
   if (!DOWNLOAD_SPECTRE) return(NULL)
   
@@ -234,10 +241,16 @@ DataDownloader$downloadSPECTRE <- function(target_res_arcmin = 5) {
   }
   
   res_tag <- sprintf("%dm", round(target_res_arcmin * 10))
-  cache_path <- file.path(TIF_DIR, paste0("spectre_", res_tag, ".tif"))
-  if (file.exists(cache_path)) {
-    cat("  Cache hit:", cache_path, "\n")
-    return(cache_path)
+  template <- DataDownloader$makeTargetTemplate(target_res_arcmin)
+  
+  # Legacy cache from before per-layer extraction: a single "spectre_<res>.tif"
+  # holding all bands. Remove it so it can't sit next to the new per-layer
+  # files and get double-counted when TIF_DIR is stacked.
+  legacy_combined <- file.path(TIF_DIR, paste0("spectre_", res_tag, ".tif"))
+  if (file.exists(legacy_combined)) {
+    cat("  Removing legacy multi-layer SPECTRE file (superseded by per-layer TIFs):",
+        basename(legacy_combined), "\n")
+    file.remove(legacy_combined)
   }
   
   wcs_base <- "https://paituli.csc.fi/geoserver/wcs"
@@ -254,43 +267,55 @@ DataDownloader$downloadSPECTRE <- function(target_res_arcmin = 5) {
   if (!dir.exists(per_layer_dir)) dir.create(per_layer_dir, recursive = TRUE)
   
   options(timeout = 600)
-  layer_paths <- character(0)
+  out_paths <- character(0)
   
   for (i in 1:min(21, nrow(meta))) {
-    layer_name <- as.character(meta[i, 2])
+    layer_name  <- as.character(meta[i, 2])
     coverage_id <- as.character(meta[i, 3])
-    out_file <- file.path(per_layer_dir, paste0(coverage_id, "_", res_tag, ".tif"))
     
-    if (file.exists(out_file) && file.size(out_file) > 1024) {
-      layer_paths <- c(layer_paths, out_file); next
+    # Skip work entirely if this layer's final resampled TIF already exists.
+    final_out <- file.path(TIF_DIR, sprintf("spectre_%s_%s.tif", coverage_id, res_tag))
+    if (file.exists(final_out)) {
+      cat("  Cache hit:", basename(final_out), "\n")
+      out_paths <- c(out_paths, final_out)
+      next
     }
     
-    url <- sprintf(paste0("%s?version=2.0.1&request=GetCoverage&coverageId=%s",
-                          "&subset=Long(-180,180)&subset=Lat(-60,90)",
-                          "&format=image/tiff&SCALESIZE=i(%d),j(%d)"),
-                   wcs_base, coverage_id, width, height)
+    raw_file <- file.path(per_layer_dir, paste0(coverage_id, "_", res_tag, ".tif"))
     
-    ok <- tryCatch({
-      utils::download.file(url, out_file, mode = "wb", quiet = TRUE); TRUE
-    }, error = function(e) FALSE)
-    
-    if (ok && file.size(out_file) > 1024) {
-      layer_paths <- c(layer_paths, out_file)
+    if (!(file.exists(raw_file) && file.size(raw_file) > 1024)) {
+      url <- sprintf(paste0("%s?version=2.0.1&request=GetCoverage&coverageId=%s",
+                            "&subset=Long(-180,180)&subset=Lat(-60,90)",
+                            "&format=image/tiff&SCALESIZE=i(%d),j(%d)"),
+                     wcs_base, coverage_id, width, height)
+      
+      ok <- tryCatch({
+        utils::download.file(url, raw_file, mode = "wb", quiet = TRUE); TRUE
+      }, error = function(e) FALSE)
+      
+      if (!ok || file.size(raw_file) <= 1024) {
+        cat("  Failed:", layer_name, "\n")
+        next
+      }
       cat("  Got:", layer_name, "\n")
     }
+    
+    # Resample this single layer on its own and write it straight to TIF_DIR.
+    lyr <- tryCatch(terra::rast(raw_file), error = function(e) NULL)
+    if (is.null(lyr)) next
+    
+    if (terra::crs(lyr) == "" || is.na(terra::crs(lyr))) {
+      terra::crs(lyr) <- "EPSG:4326"
+    }
+    names(lyr) <- coverage_id
+    lyr_res <- terra::resample(lyr, template, method = "bilinear")
+    terra::writeRaster(lyr_res, final_out, overwrite = TRUE)
+    cat("    ", layer_name, "->", basename(final_out), "\n")
+    out_paths <- c(out_paths, final_out)
   }
   
-  if (length(layer_paths) == 0) return(NULL)
-  
-  spectre <- terra::rast(layer_paths)
-  template <- DataDownloader$makeTargetTemplate(target_res_arcmin)
-  if (terra::crs(spectre) == "" || is.na(terra::crs(spectre))) {
-    terra::crs(spectre) <- "EPSG:4326"
-  }
-  spectre <- terra::resample(spectre, template, method = "bilinear")
-  terra::writeRaster(spectre, cache_path, overwrite = TRUE)
-  cat("  ->", cache_path, "\n")
-  return(cache_path)
+  if (length(out_paths) == 0) return(NULL)
+  return(out_paths)
 }
 
 # ── Process custom user layers ──────────────────────────────────────────────

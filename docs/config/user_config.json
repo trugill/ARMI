@@ -6,10 +6,10 @@
     "maxent_jar": "bin/maxent.jar"
   },
   "species": {
-    "species_list": "Rhacodactylus leachianus",
+    "species_list": "Varanus exanthematicus",
     "use_raw_gbif": true,
     "trim_occurrences": true,
-    "species_auto": "Rhacodactylus leachianus",
+    "species_auto": "Varanus exanthematicus",
     "species_manual": [],
     "download_mode": "automatic",
     "use_iucn_range": true
@@ -23,12 +23,13 @@
     "download_gbif": true,
     "extract_iucn_range": true,
     "override_existing": false,
-    "active_layer_dirs": ["Custom", "WorldClim"]
+    "active_layer_dirs": ["Custom", "WorldClim", "R"]
   },
   "gbif": {
     "max_records": 100000,
     "page_size": 300,
-    "min_confidence": 90
+    "min_confidence": 90,
+    "skip_existing": true
   },
   "resolution": {
     "mode": "auto",
@@ -46,9 +47,9 @@
   },
   "mask": {
     "use_mask": true,
-    "min_lon": 35,
-    "max_lon": 53,
-    "min_lat": 35,
+    "min_lon": -127,
+    "max_lon": -30,
+    "min_lat": -60,
     "max_lat": 50
   },
   "model_parameters": {

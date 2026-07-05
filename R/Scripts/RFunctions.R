@@ -22,10 +22,30 @@ RFunctions$trimDupes <- function(points_file_path = NULL,
   if (is.null(points_file_path)) points_file_path <- PathManager$getSpeciesPath()
   
   if (is.null(mask_file_path)) {
-    asc_files <- list.files(PathManager$getLayersPath(), pattern = "\\.asc$", 
-                            full.names = TRUE)
-    if (length(asc_files) == 0) stop("No .asc files found for mask")
+    # Resolution is set once, at resampling time (Step 0) -- every layer in
+    # ASC_DIR shares the same grid, so any one of them can define the cells
+    # for deduping points. Preferring the master ASC_DIR (rather than the
+    # per-species ClippedLayers) means this can run as soon as Step 0 has
+    # produced layers, without waiting on Step 4's per-species clip.
+    asc_dir <- if (exists("ASC_DIR", envir = .GlobalEnv)) get("ASC_DIR", envir = .GlobalEnv) else NULL
+    asc_files <- if (!is.null(asc_dir) && dir.exists(asc_dir)) {
+      sort(list.files(asc_dir, pattern = "\\.asc$", full.names = TRUE))
+    } else {
+      character(0)
+    }
+    
+    if (length(asc_files) == 0) {
+      # Fall back to the per-species clipped layers (e.g. if Step 0 hasn't
+      # produced a master grid but Step 4 has already clipped some layers).
+      asc_files <- sort(list.files(PathManager$getLayersPath(), pattern = "\\.asc$",
+                                   full.names = TRUE))
+    }
+    if (length(asc_files) == 0) {
+      stop("No .asc files found for mask (checked ASC/ and ClippedLayers/). ",
+           "Run Step 0 to produce resampled layers first.")
+    }
     mask_file_path <- asc_files[1]
+    cat("Using raster for cell resolution:", mask_file_path, "\n")
   }
   
   if (is.null(output_file_path)) {
@@ -68,8 +88,142 @@ RFunctions$trimDupes <- function(points_file_path = NULL,
   return(output_file_path)
 }
 
+# ---- TrimDupes with Range Polygon Clipping ----
+# Clips occurrences to a range polygon AND resamples to one point per cell.
+# The output .trimmed.csv contains ONLY points inside the polygon, deduped by cell.
+RFunctions$trimDupesWithRange <- function(points_file_path = NULL,
+                                          range_shp_path = NULL,
+                                          mask_file_path = NULL,
+                                          output_file_path = NULL) {
+  if (is.null(points_file_path)) points_file_path <- PathManager$getSpeciesPath()
+  
+  if (is.null(range_shp_path) || !file.exists(range_shp_path)) {
+    stop("Range shapefile not found: ", range_shp_path)
+  }
+  
+  if (is.null(mask_file_path)) {
+    asc_dir <- if (exists("ASC_DIR", envir = .GlobalEnv)) get("ASC_DIR", envir = .GlobalEnv) else NULL
+    asc_files <- if (!is.null(asc_dir) && dir.exists(asc_dir)) {
+      sort(list.files(asc_dir, pattern = "\\.asc$", full.names = TRUE))
+    } else {
+      character(0)
+    }
+    if (length(asc_files) == 0) {
+      asc_files <- sort(list.files(PathManager$getLayersPath(),
+                                   pattern = "\\.asc$", full.names = TRUE))
+    }
+    if (length(asc_files) == 0) {
+      stop("No .asc files found for cell resolution reference.")
+    }
+    mask_file_path <- asc_files[1]
+    cat("Using raster for cell resolution:", mask_file_path, "\n")
+  }
+  
+  if (is.null(output_file_path)) {
+    base_name <- tools::file_path_sans_ext(basename(points_file_path))
+    output_file_path <- file.path(dirname(points_file_path),
+                                  paste0(base_name, ".trimmed.csv"))
+  }
+  
+  cat("Clipping occurrences to range polygon:\n")
+  cat("  Points:    ", points_file_path, "\n")
+  cat("  Range SHP: ", range_shp_path, "\n")
+  
+  # ---- Read points ----
+  original_points <- read.csv(points_file_path, stringsAsFactors = FALSE)
+  species_name_from_file <- tools::file_path_sans_ext(basename(points_file_path))
+  cat("  Original point count:", nrow(original_points), "\n")
+  
+  # Identify lat/lon columns
+  cn <- names(original_points)
+  lat_col <- if ("latitude" %in% cn) "latitude"
+  else if ("decimalLatitude" %in% cn) "decimalLatitude"
+  else cn[2]
+  lon_col <- if ("longitude" %in% cn) "longitude"
+  else if ("decimalLongitude" %in% cn) "decimalLongitude"
+  else cn[3]
+  
+  # Drop rows with missing coordinates
+  original_points <- original_points[
+    !is.na(original_points[[lat_col]]) & !is.na(original_points[[lon_col]]), ]
+  
+  if (nrow(original_points) == 0) {
+    stop("No valid coordinates in points file.")
+  }
+  
+  # ---- Clip to polygon ----
+  sf::sf_use_s2(FALSE)
+  on.exit(sf::sf_use_s2(TRUE))
+  
+  points_sf <- sf::st_as_sf(original_points,
+                            coords = c(lon_col, lat_col),
+                            crs = 4326)
+  
+  polygons_sf <- sf::st_read(range_shp_path, quiet = TRUE)
+  if (any(!sf::st_is_valid(polygons_sf))) {
+    polygons_sf <- sf::st_make_valid(polygons_sf)
+    polygons_sf <- polygons_sf[sf::st_is_valid(polygons_sf), ]
+  }
+  if (sf::st_crs(points_sf) != sf::st_crs(polygons_sf)) {
+    points_sf <- sf::st_transform(points_sf, sf::st_crs(polygons_sf))
+  }
+  
+  clipped_sf <- sf::st_filter(points_sf, polygons_sf)
+  if (sf::st_crs(clipped_sf)$input != "EPSG:4326") {
+    clipped_sf <- sf::st_transform(clipped_sf, 4326)
+  }
+  
+  cat("  After polygon clip:", nrow(clipped_sf), "points\n")
+  
+  if (nrow(clipped_sf) == 0) {
+    warning("No occurrences inside range polygon - writing empty file")
+    empty_df <- data.frame(species = character(0),
+                           latitude = numeric(0),
+                           longitude = numeric(0))
+    write.csv(empty_df, output_file_path, row.names = FALSE)
+    return(output_file_path)
+  }
+  
+  coords <- sf::st_coordinates(clipped_sf)
+  clipped_df <- data.frame(
+    species   = species_name_from_file,
+    latitude  = coords[, 2],
+    longitude = coords[, 1],
+    stringsAsFactors = FALSE
+  )
+  
+  # ---- Resample to one point per raster cell ----
+  clipped_vect <- terra::vect(clipped_df,
+                              geom = c("longitude", "latitude"),
+                              crs = "EPSG:4326")
+  mask_raster <- terra::rast(mask_file_path)
+  
+  if (has_enmtools) {
+    trimmed_points <- ENMTools::trimdupes.by.raster(points = clipped_vect,
+                                                    mask = mask_raster)
+  } else {
+    cells <- terra::cells(mask_raster, clipped_vect)[, "cell"]
+    keep_idx <- !duplicated(cells) & !is.na(cells)
+    trimmed_points <- clipped_vect[keep_idx, ]
+  }
+  
+  final_coords <- terra::crds(trimmed_points)
+  final_df <- data.frame(
+    species   = species_name_from_file,
+    latitude  = final_coords[, 2],
+    longitude = final_coords[, 1],
+    stringsAsFactors = FALSE
+  )
+  
+  cat("  After cell dedup:  ", nrow(final_df), "points (final)\n")
+  
+  write.csv(final_df, output_file_path, row.names = FALSE)
+  cat("  Saved to:", output_file_path, "\n")
+  return(output_file_path)
+}
+
 # ---- Correlation ----
-RFunctions$correlation <- function(maxent_result_path, threshold, count, 
+RFunctions$correlation <- function(maxent_result_path, threshold, count,
                                    species_path = NULL) {
   cat("Calculating correlation between top variables...\n")
   
@@ -81,14 +235,36 @@ RFunctions$correlation <- function(maxent_result_path, threshold, count,
   
   layers_path <- PathManager$getLayersPath()
   list_file <- file.path(layers_path, paste0(top_vars, ".asc"))
-  list_file <- list_file[file.exists(list_file)]
+  
+  # Keep only files that actually exist, remembering the intended name
+  exists_mask <- file.exists(list_file)
+  if (!all(exists_mask)) {
+    missing <- top_vars[!exists_mask]
+    cat("  Missing .asc for:", paste(missing, collapse = ", "), "\n")
+  }
+  list_file <- list_file[exists_mask]
+  kept_names <- top_vars[exists_mask]
   
   if (length(list_file) == 0) stop("No matching .asc files found")
   
   ac <- raster::stack(list_file)
+  # Force layer names to match the .asc filename stems exactly.
+  # raster::stack otherwise strips shared prefixes / munges names,
+  # which is what caused the downstream combo/_variables.txt mismatch.
+  names(ac) <- kept_names
+  
   ac.brick <- raster::brick(ac)
+  names(ac.brick) <- kept_names
   ac.brick[ac.brick < -100] <- NA
+  
   rc2.corr <- raster::layerStats(ac.brick, "pearson", na.rm = TRUE)
+  
+  # layerStats returns a list; the matrix is in $`pearson correlation coefficient`.
+  # Force its row/col names too, in case raster still mangled them.
+  corr_mat <- rc2.corr[[1]]
+  rownames(corr_mat) <- kept_names
+  colnames(corr_mat) <- kept_names
+  rc2.corr[[1]] <- corr_mat
   
   save_file <- PathManager$getCorrelationPath()
   write.csv(rc2.corr, save_file)
@@ -96,16 +272,23 @@ RFunctions$correlation <- function(maxent_result_path, threshold, count,
   return(save_file)
 }
 
-# ---- Combos ----
 RFunctions$combos <- function(threshold = 0.8, csv_path = NULL, model_path = NULL) {
   if (is.null(csv_path)) csv_path <- PathManager$getCorrelationPath()
   if (is.null(model_path)) model_path <- PathManager$getModelsPath()
   
   cat("Generating variable combinations from:", csv_path, "\n")
   
-  corr <- read.csv(csv_path, header = TRUE)
+  # check.names=FALSE preserves dots and special chars in variable names
+  # (e.g. "wc2.1_bio_15_60m" won't become "wc2.1_bio_15_60m" -> "wc2_1_bio_15_60m")
+  corr <- read.csv(csv_path, header = TRUE, check.names = FALSE)
   corr <- corr[, -c(1, ncol(corr))]
-  colnames(corr) <- gsub("^pearson.correlation.coefficient.", "", colnames(corr))
+  colnames(corr) <- gsub("^pearson correlation coefficient\\.", "",
+                         colnames(corr))
+  colnames(corr) <- gsub("^pearson\\.correlation\\.coefficient\\.", "",
+                         colnames(corr))
+  
+  cat("  Correlation matrix variables:\n")
+  for (nm in colnames(corr)) cat("    ", nm, "\n")
   
   if (!dir.exists(model_path)) dir.create(model_path, recursive = TRUE)
   
@@ -130,12 +313,19 @@ RFunctions$combos <- function(threshold = 0.8, csv_path = NULL, model_path = NUL
       }
       
       if (is_valid) {
-        combo_name <- paste(colnames(corr)[combo], collapse = "_")
-        combo_dir <- file.path(model_path, combo_name)
-        if (!dir.exists(combo_dir)) dir.create(combo_dir, recursive = TRUE)
-        combo_csv <- file.path(model_path, paste0("combinations_", size, ".csv"))
-        write(combo_name, file = combo_csv, append = TRUE)
+        combo_vars <- colnames(corr)[combo]
+        combo_name <- paste(combo_vars, collapse = "_")
+        
         total_created <- total_created + 1
+        combo_dir_name <- sprintf("combo_%05d", total_created)
+        combo_dir <- file.path(model_path, combo_dir_name)
+        if (!dir.exists(combo_dir)) dir.create(combo_dir, recursive = TRUE)
+        
+        writeLines(combo_vars, file.path(combo_dir, "_variables.txt"))
+        
+        combo_csv <- file.path(model_path, paste0("combinations_", size, ".csv"))
+        write(paste(combo_dir_name, combo_name, sep = ","),
+              file = combo_csv, append = TRUE)
       }
     }
   }
@@ -273,6 +463,391 @@ RFunctions$clipToShp <- function(points_path = NULL, shape_path, output_path = N
   return(output_path)
 }
 
+# =============================================================================
+# ENMTools-style model selection (auto-detects CSV format, computes AIC/AICc/BIC)
+# =============================================================================
+
+# ---- Read a points CSV and detect lat/lon columns -----------------------------
+RFunctions$read_points_csv <- function(infile, verbose = TRUE) {
+  lines <- readLines(infile, warn = FALSE)
+  if (length(lines) < 2) {
+    stop(sprintf("CSV has fewer than 2 lines: %s", infile))
+  }
+  
+  header <- trimws(lines[1])
+  header_fields <- strsplit(header, ",", fixed = TRUE)[[1]]
+  header_fields_clean <- trimws(tolower(header_fields))
+  
+  lat_idx <- which(grepl("^lat", header_fields_clean))[1]
+  lon_idx <- which(grepl("^lon", header_fields_clean))[1]
+  
+  if (is.na(lat_idx) || is.na(lon_idx)) {
+    if (length(header_fields) >= 3) {
+      lon_idx <- 2L; lat_idx <- 3L
+      if (verbose) message("  WARNING: lat/lon not found by name; ",
+                           "assuming Maxent default (col2=lon, col3=lat)")
+    } else if (length(header_fields) == 2) {
+      lat_idx <- 1L; lon_idx <- 2L
+      if (verbose) message("  WARNING: lat/lon not detected; assuming (col1=lat, col2=lon)")
+    } else {
+      stop("Cannot determine lat/lon columns in CSV")
+    }
+  }
+  
+  has_species <- (length(header_fields) >= 3) &&
+    !(1 %in% c(lat_idx, lon_idx))
+  
+  rows <- vector("list", length(lines) - 1)
+  keep <- logical(length(lines) - 1)
+  for (i in seq_along(rows)) {
+    ln <- trimws(lines[i + 1], which = "right")
+    if (nchar(ln) == 0) { keep[i] <- FALSE; next }
+    fields <- strsplit(ln, ",", fixed = TRUE)[[1]]
+    if (length(fields) < max(lat_idx, lon_idx)) { keep[i] <- FALSE; next }
+    rows[[i]] <- trimws(fields)
+    keep[i] <- TRUE
+  }
+  rows <- rows[keep]
+  
+  if (verbose) {
+    message(sprintf("  CSV: %d columns [%s]",
+                    length(header_fields),
+                    paste(header_fields, collapse = ", ")))
+    message(sprintf("  Detected: lat_idx=%d, lon_idx=%d, has_species=%s",
+                    lat_idx, lon_idx, has_species))
+    message(sprintf("  Loaded %d data rows", length(rows)))
+  }
+  
+  list(
+    header      = header,
+    has_species = has_species,
+    lat_idx     = lat_idx,
+    lon_idx     = lon_idx,
+    rows        = rows
+  )
+}
+
+# ---- Compute AIC/AICc/BIC for a single model ---------------------------------
+RFunctions$compute_AIC <- function(datafile, csv_info, lambdasfile,
+                                   verbose = TRUE) {
+  loglikelihood <- 0
+  
+  # Count non-zero lambdas
+  lambda_lines <- readLines(lambdasfile, warn = FALSE)
+  nparams <- 0
+  for (ln in lambda_lines) {
+    parts <- strsplit(ln, ",", fixed = TRUE)[[1]]
+    if (length(parts) < 2) next
+    weight <- sub("\\s+", "", parts[2])
+    if (!identical(weight, "0.0")) nparams <- nparams + 1
+  }
+  nparams <- nparams - 4  # Subtract MaxEnt metadata lines
+  
+  # Parse ASCII raster
+  asc_lines <- readLines(datafile, warn = FALSE)
+  fileparams <- list()
+  data_lines <- character(0)
+  
+  for (ln in asc_lines) {
+    if (grepl("^\\s*[0-9-]", ln)) {
+      data_lines <- c(data_lines, trimws(ln, which = "right"))
+    } else {
+      parts <- strsplit(trimws(ln), "\\s+")[[1]]
+      if (length(parts) >= 2) {
+        fileparams[[tolower(parts[1])]] <- parts[2]
+      }
+    }
+  }
+  
+  xll      <- as.numeric(fileparams[["xllcorner"]])
+  yll      <- as.numeric(fileparams[["yllcorner"]])
+  cellsize <- as.numeric(fileparams[["cellsize"]])
+  ncols    <- as.integer(fileparams[["ncols"]])
+  nrows    <- as.integer(fileparams[["nrows"]])
+  
+  if (verbose) {
+    message(sprintf("  Raster geometry: xll=%g, yll=%g, cellsize=%g, ncols=%s, nrows=%s",
+                    xll, yll, cellsize,
+                    ifelse(is.na(ncols), "?", ncols),
+                    ifelse(is.na(nrows), "?", nrows)))
+    message(sprintf("  Data rows found: %d", length(data_lines)))
+  }
+  
+  # Row 0 = bottom of map
+  env_data <- rev(data_lines)
+  
+  # Pre-split for speed
+  env_cells <- lapply(env_data, function(r) {
+    v <- strsplit(r, "\\s+")[[1]]
+    suppressWarnings(as.numeric(v[v != ""]))
+  })
+  
+  probsum <- sum(sapply(env_cells, function(v) {
+    ok <- !is.na(v) & v != -9999
+    sum(v[ok])
+  }))
+  if (verbose) message(sprintf("  probsum = %g", probsum))
+  
+  npoints              <- 0
+  points_processed     <- 0
+  points_out_of_bounds <- 0
+  points_no_data       <- 0
+  
+  for (fields in csv_info$rows) {
+    points_processed <- points_processed + 1
+    
+    thisx <- suppressWarnings(as.numeric(fields[csv_info$lon_idx]))
+    thisy <- suppressWarnings(as.numeric(fields[csv_info$lat_idx]))
+    if (is.na(thisx) || is.na(thisy)) next
+    
+    row <- as.integer(floor((thisy - yll) / cellsize))
+    col <- as.integer(floor((thisx - xll) / cellsize))
+    
+    if (row < 0 || row >= length(env_cells)) {
+      points_out_of_bounds <- points_out_of_bounds + 1
+      next
+    }
+    cells <- env_cells[[row + 1]]
+    if (col < 0 || col >= length(cells)) {
+      points_out_of_bounds <- points_out_of_bounds + 1
+      next
+    }
+    
+    layer_value <- cells[col + 1]
+    
+    if (!is.na(layer_value) && layer_value > 0) {
+      loglikelihood <- loglikelihood + log(layer_value / probsum)
+      npoints <- npoints + 1
+    } else {
+      points_no_data <- points_no_data + 1
+    }
+  }
+  
+  if (verbose) {
+    message(sprintf("  === Summary: processed=%d, matched=%d, oob=%d, no-data/zero=%d ===",
+                    points_processed, npoints,
+                    points_out_of_bounds, points_no_data))
+  }
+  
+  if (nparams >= npoints - 1) {
+    AICscore <- NA_real_; AICcscore <- NA_real_; BICscore <- NA_real_
+  } else {
+    AICscore  <- 2 * nparams - 2 * loglikelihood
+    AICcscore <- AICscore + (2 * nparams * (nparams + 1) / (npoints - nparams - 1))
+    BICscore  <- nparams * log(npoints) - 2 * loglikelihood
+  }
+  
+  list(
+    loglikelihood = loglikelihood,
+    nparams       = nparams,
+    npoints       = npoints,
+    AIC           = AICscore,
+    AICc          = AICcscore,
+    BIC           = BICscore
+  )
+}
+
+# ---- Extract stats for one model and write to output connection --------------
+RFunctions$modsel_extract_data <- function(ascfile, csv_info, lambdasfile,
+                                           outcon, csvfile_label,
+                                           verbose = TRUE) {
+  if (verbose) {
+    message(sprintf("\nExtracting data from %s using %s...", ascfile, csvfile_label))
+  }
+  res <- RFunctions$compute_AIC(ascfile, csv_info, lambdasfile, verbose = verbose)
+  outline <- paste(
+    csvfile_label, ascfile,
+    res$loglikelihood, res$nparams, res$npoints,
+    res$AIC, res$AICc, res$BIC,
+    sep = ","
+  )
+  writeLines(outline, con = outcon)
+  return(res)
+}
+
+# ---- Main entry point: process a modelSelection.csv control file -------------
+# Control file format (no header, comma-separated):
+#   <points_csv>,<ascii_file>,<lambdas_file>
+# Writes: <control_file_stem>_model_selection.csv (with header)
+RFunctions$modsel_execute <- function(modselfile, output_path = NULL,
+                                      verbose = TRUE) {
+  if (!file.exists(modselfile)) {
+    stop(sprintf("Control file not found: %s", modselfile))
+  }
+  
+  if (is.null(output_path)) {
+    output_path <- sub("\\.csv$", "_model_selection.csv", modselfile,
+                       ignore.case = TRUE)
+    if (identical(output_path, modselfile)) {
+      output_path <- paste0(modselfile, "_model_selection.csv")
+    }
+  }
+  
+  outcon <- file(output_path, open = "w")
+  on.exit(close(outcon), add = TRUE)
+  
+  writeLines(
+    "Points,ASCII file,Log Likelihood,Parameters,Sample Size,AIC score,AICc score,BIC score",
+    con = outcon
+  )
+  
+  control_lines <- readLines(modselfile, warn = FALSE)
+  csv_cache <- list()
+  processed <- 0
+  skipped   <- 0
+  
+  for (raw in control_lines) {
+    line <- trimws(raw, which = "right")
+    line <- gsub("\"", "", line, fixed = TRUE)
+    if (nchar(line) == 0) next
+    
+    fields <- strsplit(line, ",", fixed = TRUE)[[1]]
+    if (length(fields) < 3) {
+      message(sprintf("Skipping malformed line: %s", raw))
+      skipped <- skipped + 1
+      next
+    }
+    
+    points_csv   <- fields[1]
+    ascii_file   <- fields[2]
+    lambdas_file <- fields[3]
+    
+    ready_to_go <- TRUE
+    if (!file.exists(points_csv)) {
+      message(sprintf("  MISSING points CSV:   %s", points_csv))
+      ready_to_go <- FALSE
+    }
+    if (!file.exists(ascii_file)) {
+      message(sprintf("  MISSING ASCII output: %s", ascii_file))
+      ready_to_go <- FALSE
+    }
+    if (!file.exists(lambdas_file)) {
+      message(sprintf("  MISSING lambdas:      %s", lambdas_file))
+      ready_to_go <- FALSE
+    }
+    
+    if (ready_to_go) {
+      if (is.null(csv_cache[[points_csv]])) {
+        csv_cache[[points_csv]] <- RFunctions$read_points_csv(points_csv,
+                                                              verbose = verbose)
+      }
+      RFunctions$modsel_extract_data(
+        ascii_file, csv_cache[[points_csv]], lambdas_file,
+        outcon, csvfile_label = points_csv, verbose = verbose
+      )
+      processed <- processed + 1
+    } else {
+      skipped <- skipped + 1
+    }
+  }
+  
+  message(sprintf("\nModel selection done: %d processed, %d skipped", processed, skipped))
+  message(sprintf("Output: %s", output_path))
+  invisible(output_path)
+}
+
+# ---- Layer name resolution --------------------------------------------------
+# Maps MaxEnt's shortened variable names (e.g. "BIO05") back to the real
+# filenames on disk (e.g. "wc2.1_bio_05_60m.asc"). Handles WorldClim naming
+# and falls back to raw filenames for custom layers.
+RFunctions$buildLayerNameMap <- function(layer_dir) {
+  if (!dir.exists(layer_dir)) stop("Layer directory does not exist: ", layer_dir)
+  
+  asc_files <- list.files(layer_dir, pattern = "\\.asc$", full.names = TRUE)
+  if (length(asc_files) == 0) stop("No .asc files in: ", layer_dir)
+  
+  bases <- tools::file_path_sans_ext(basename(asc_files))
+  name_map <- list()
+  
+  for (i in seq_along(asc_files)) {
+    b    <- bases[i]
+    path <- asc_files[i]
+    
+    # Extract the bioclim number if this is a WorldClim file
+    match <- regmatches(
+      b,
+      regexec("^wc2\\.[0-9]+_bio_0*([0-9]+)_.*$", b, ignore.case = TRUE)
+    )[[1]]
+    
+    if (length(match) == 2) {
+      num_str <- match[2]                       # "5"  (no padding)
+      num_int <- as.integer(num_str)            # 5
+      padded  <- sprintf("BIO%02d", num_int)    # "BIO05"
+      unpad   <- sprintf("BIO%d",  num_int)     # "BIO5"
+      
+      name_map[[padded]] <- path
+      name_map[[unpad]]  <- path
+      
+      # Also case-insensitive variants
+      name_map[[tolower(padded)]] <- path
+      name_map[[tolower(unpad)]]  <- path
+    }
+    
+    # Register the raw filename base too (for non-WorldClim custom layers)
+    name_map[[b]]           <- path
+    name_map[[toupper(b)]]  <- path
+    name_map[[tolower(b)]]  <- path
+  }
+  
+  return(name_map)
+}
+
+
+# Look up a single short/raw name -> full .asc path (NULL if not found)
+RFunctions$resolveLayerFile <- function(name, name_map, layer_dir) {
+  # Direct match
+  hit <- name_map[[name]]
+  if (!is.null(hit) && file.exists(hit)) return(hit)
+  
+  # Uppercase
+  hit <- name_map[[toupper(name)]]
+  if (!is.null(hit) && file.exists(hit)) return(hit)
+  
+  # Lowercase
+  hit <- name_map[[tolower(name)]]
+  if (!is.null(hit) && file.exists(hit)) return(hit)
+  
+  # Strip leading zeros from any BIO## and retry (BIO05 -> BIO5)
+  if (grepl("^BIO0*[0-9]+$", name, ignore.case = TRUE)) {
+    n <- as.integer(sub("^BIO0*", "", name, ignore.case = TRUE))
+    for (candidate in c(sprintf("BIO%d", n), sprintf("BIO%02d", n))) {
+      hit <- name_map[[candidate]]
+      if (!is.null(hit) && file.exists(hit)) return(hit)
+    }
+  }
+  
+  # Last resort: try <name>.asc directly in the layer dir
+  raw <- file.path(layer_dir, paste0(name, ".asc"))
+  if (file.exists(raw)) return(raw)
+  
+  return(NULL)
+}
+
+# Recover the exact variable names that make up a combo. combos() writes a
+# "_variables.txt" manifest into each combo directory containing exactly
+# those names, one per line -- this is the safe way to read them back.
+#
+# Do NOT reconstruct this list by splitting the combo folder name on "_":
+# the folder name is built by JOINING variable names with "_", but real
+# variable names can themselves contain underscores (a SPECTRE layer like
+# "spectre_paituli__hy_spectre_1_9_human_biomes_60m" has a dozen), so that
+# join is not reversible by splitting. Doing so shreds multi-word variable
+# names into meaningless single-word fragments that fail to resolve, and
+# the whole combo gets skipped.
+#
+# Falls back to the legacy split-on-"_" behavior only for combo folders
+# that predate this manifest (i.e. no "_variables.txt" present) -- re-run
+# Step 9 (combos) to regenerate manifests for old combo folders.
+RFunctions$getComboVariables <- function(combo_dir, folder_name) {
+  manifest <- file.path(combo_dir, "_variables.txt")
+  if (file.exists(manifest)) {
+    vars <- readLines(manifest, warn = FALSE)
+    vars <- vars[nzchar(trimws(vars))]
+    if (length(vars) > 0) return(vars)
+  }
+  strsplit(folder_name, "_")[[1]]
+}
+
 # ---- Model Selection (AIC/AICc/BIC) ----
 RFunctions$read_lambdas <- function(lambdas_path) {
   if (!file.exists(lambdas_path)) stop("Lambdas file not found: ", lambdas_path)
@@ -352,41 +927,31 @@ RFunctions$calculate_information_criteria <- function(ll, k, n) {
 }
 
 RFunctions$processModelSelection <- function(csv_path, output_path) {
-  input_data <- read.csv(csv_path, header = FALSE, stringsAsFactors = FALSE)
-  colnames(input_data)[1:3] <- c("datapoints_path", "raster_path", "lambdas_path")
-  cat("Processing", nrow(input_data), "models for selection\n")
+  cat("Running ENMTools-style model selection...\n")
+  cat("  Control file:", csv_path, "\n")
+  cat("  Output:      ", output_path, "\n")
   
-  results <- data.frame(
-    points_path = input_data$datapoints_path,
-    ascii_file_path = input_data$raster_path,
-    loglikelihood = NA_real_, parameter_count = NA_real_,
-    sample_size = NA_integer_, aic_score = NA_real_,
-    aicc_score = NA_real_, bic_score = NA_real_,
-    probsum = NA_real_, valid_points = NA_integer_,
-    total_points = NA_integer_, error_message = "",
-    stringsAsFactors = FALSE
-  )
+  RFunctions$modsel_execute(csv_path,
+                            output_path = output_path,
+                            verbose = TRUE)
   
-  for (i in 1:nrow(input_data)) {
-    cat("  Model", i, "of", nrow(input_data), "\n")
-    res <- RFunctions$calculate_loglikelihood(input_data$datapoints_path[i],
-                                              input_data$raster_path[i])
-    results$loglikelihood[i] <- res$loglikelihood
-    results$sample_size[i] <- ifelse(is.null(res$sample_size), NA, res$sample_size)
-    results$valid_points[i] <- ifelse(is.null(res$valid_points), NA, res$valid_points)
-    results$total_points[i] <- ifelse(is.null(res$total_points), NA, res$total_points)
-    results$probsum[i] <- ifelse(is.null(res$probsum), NA, res$probsum)
-    results$error_message[i] <- ifelse(is.null(res$error), "", res$error)
-    
-    k <- RFunctions$count_parameters(input_data$lambdas_path[i])
-    results$parameter_count[i] <- k
-    ic <- RFunctions$calculate_information_criteria(res$loglikelihood, k, res$sample_size)
-    results$aic_score[i] <- ic$aic
-    results$aicc_score[i] <- ic$aicc
-    results$bic_score[i] <- ic$bic
+  # Read back and reshape into the format Step 11 expects
+  results <- read.csv(output_path, stringsAsFactors = FALSE)
+  
+  # Rename columns to match what findLowestScoreVariables looks for
+  colnames(results) <- c("points_path", "ascii_file_path",
+                         "loglikelihood", "parameter_count", "sample_size",
+                         "aic_score", "aicc_score", "bic_score")
+  
+  # Coerce numeric columns (they may contain "x" from ENMTools convention)
+  for (col in c("loglikelihood", "parameter_count", "sample_size",
+                "aic_score", "aicc_score", "bic_score")) {
+    results[[col]] <- suppressWarnings(as.numeric(results[[col]]))
   }
   
+  # Overwrite the output file with the reshaped/normalized version
   write.csv(results, output_path, row.names = FALSE)
+  
   cat("Model selection saved to:", output_path, "\n")
   return(results)
 }

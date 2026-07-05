@@ -17,7 +17,7 @@ MaxentCaller$runMaxent <- function(species_path, args = character(0), output_dir
   }
   
   if (is.null(output_dir)) {
-    output_dir <- file.path(PathManager$getModelsPath(), 
+    output_dir <- file.path(PathManager$getModelsPath(),
                             tools::file_path_sans_ext(basename(species_path)))
   }
   if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
@@ -36,14 +36,42 @@ MaxentCaller$runMaxent <- function(species_path, args = character(0), output_dir
   cat("Running MaxEnt for:", basename(species_path), "\n")
   cat("Output:", output_dir, "\n")
   
+  # Write the exact command to a file so we can inspect / replay
+  cmd_log <- file.path(output_dir, "maxent_command.txt")
+  writeLines(c("java", cmd_args), cmd_log)
+  
   result <- tryCatch({
     system2("java", args = cmd_args, stdout = TRUE, stderr = TRUE)
   }, error = function(e) {
-    cat("MaxEnt execution error:", e$message, "\n")
+    cat("  MaxEnt execution error:", e$message, "\n")
     return(NULL)
   })
+  
+  # Save full stdout/stderr
+  if (!is.null(result)) {
+    log_file <- file.path(output_dir, "maxent_stdout.log")
+    writeLines(as.character(result), log_file)
+    
+    err_lines <- grep("error|exception|failed|cannot|missing",
+                      result, ignore.case = TRUE, value = TRUE)
+    if (length(err_lines) > 0) {
+      cat("  !! MaxEnt reported problems:\n")
+      for (ln in head(err_lines, 10)) cat("     ", ln, "\n")
+    }
+  }
+  
+  # Verify an .asc actually appeared
+  ascs <- list.files(output_dir, pattern = "\\.asc$", full.names = FALSE)
+  ascs <- ascs[!grepl("_clamping|_novel", ascs)]
+  if (length(ascs) == 0) {
+    cat("  !! No prediction .asc found in", output_dir, "\n")
+    cat("     See:", cmd_log, "\n")
+    cat("     See:", file.path(output_dir, "maxent_stdout.log"), "\n")
+  }
+  
   return(output_dir)
 }
+
 
 MaxentCaller$buildLayerArgs <- function(layer_names, layers_path = NULL) {
   if (is.null(layers_path)) layers_path <- PathManager$getLayersPath()

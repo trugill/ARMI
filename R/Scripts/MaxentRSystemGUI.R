@@ -93,6 +93,7 @@ save_gui_to_config_shiny <- function(input) {
   cfg$gbif$max_records    <- as.integer(input$gbif_max_records)
   cfg$gbif$page_size      <- as.integer(input$gbif_page_size)
   cfg$gbif$min_confidence <- as.integer(input$gbif_min_confidence)
+  cfg$gbif$skip_existing  <- isTRUE(input$skip_existing_gbif)
   
   # Resolution
   cfg$resolution$mode             <- input$res_mode
@@ -199,6 +200,9 @@ load_gui_from_config_shiny <- function(session) {
   updateNumericInput(session, "gbif_max_records",    value = cfg$gbif$max_records)
   updateNumericInput(session, "gbif_page_size",      value = cfg$gbif$page_size)
   updateNumericInput(session, "gbif_min_confidence", value = cfg$gbif$min_confidence)
+  updateCheckboxInput(session, "skip_existing_gbif",
+                      value = if (!is.null(cfg$gbif$skip_existing))
+                        cfg$gbif$skip_existing else TRUE)
   
   # Resolution
   updateSelectInput(session, "res_mode",  selected = cfg$resolution$mode)
@@ -556,25 +560,37 @@ ui <- fluidPage(
                   
                   h4("Range Shapefile"),
                   checkboxInput("use_iucn_range",
-                                "Use IUCN range when available",
+                                "Clip occurrences outside of range polygon",
                                 value = FALSE),
                   div(class = "disclaimer",
                       icon("exclamation-triangle"), " ",
-                      strong("IUCN data must be downloaded separately."),
+                      strong("Range polygon must be present in species SHP folder."),
                       tags$br(),
-                      "Place shapefiles in: ", 
-                      tags$code("ARMIGithub/SHP/IUCN/"),
+                      "Expected location: ",
+                      tags$code("output/<Genus_species>/SHP/<Genus_species>_range.shp"),
                       tags$br(),
-                      "Expected structure: ", 
-                      tags$code("REPTILES_1.shp, REPTILES_2.shp, MAMMALS_1.shp, AMPHIBIANS_1.shp"), " etc.",
+                      "This can be auto-extracted from IUCN data if you place shapefiles in ",
+                      tags$code("SHP/IUCN/"), " and enable ",
+                      strong("Extract IUCN range"), " on the Data tab.",
                       tags$br(),
-                      "Download from: ",
+                      "When enabled, the ", tags$code(".trimmed.csv"),
+                      " will contain ONLY occurrences within the range polygon, ",
+                      "with one point per raster cell.",
+                      tags$br(),
+                      "IUCN data: ",
                       tags$a(href = "https://www.iucnredlist.org/resources/spatial-data-download",
                              "IUCN Red List Spatial Data", target = "_blank")),
                   
                   hr(),
                   
                   h4("GBIF Settings"),
+                  checkboxInput("skip_existing_gbif",
+                                "Do not re-download GBIF data if CSV already exists",
+                                value = TRUE),
+                  div(class = "help-text",
+                      "When enabled, species with an existing ",
+                      tags$code("output/<Genus_species>/CSV/<Genus_species>.csv"),
+                      " will be skipped during the GBIF download step."),
                   fluidRow(
                     column(4, numericInput("gbif_max_records", "Max records:",
                                            100000, min = 100, step = 1000)),
@@ -1212,10 +1228,16 @@ server <- function(input, output, session) {
 # ============================================================================
 # LAUNCH
 # ============================================================================
-
 create_maxent_gui <- function() {
-  shinyApp(ui, server, options = list(
-    launch.browser = TRUE,
-    port = 8765
-  ))
+  app <- shinyApp(ui, server)
+  
+  # runGadget opens the app in a dedicated RStudio window/pane
+  # instead of the default browser.
+  viewer <- shiny::dialogViewer(
+    dialogName = "ARMI - Automated R Maxent Integration",
+    width  = 1200,
+    height = 850
+  )
+  
+  shiny::runGadget(app, viewer = viewer)
 }
