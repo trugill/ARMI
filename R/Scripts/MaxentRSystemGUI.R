@@ -1,27 +1,19 @@
 # =============================================================================
 # MaxentRSystemGUI.R - Shiny GUI for ARMI (Updated UI)
 # =============================================================================
-
 suppressPackageStartupMessages({
   library(shiny)
   library(shinyjs)
-
-# Null-coalescing operator
-`%||%` <- function(a, b) if (is.null(a)) b else a
+  `%||%` <- function(a, b) if (is.null(a)) b else a
 })
-
-# Null-coalescing operator
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
-# Optional: leaflet for the map preview. Falls back to plot if unavailable.
 HAS_LEAFLET <- requireNamespace("leaflet", quietly = TRUE)
 if (HAS_LEAFLET) library(leaflet)
 
 # ============================================================================
 # HELPERS
 # ============================================================================
-
-# Discover folders within EnvironmentalLayers/ that already contain raster files
 discover_downloaded_layers <- function() {
   if (!exists("ENV_LAYERS_DIR") || !dir.exists(ENV_LAYERS_DIR)) {
     return(character(0))
@@ -41,7 +33,6 @@ discover_downloaded_layers <- function() {
   return(with_content)
 }
 
-# Common bioclimatic variable list for autocomplete
 COMMON_BIOCLIM_VARS <- c(
   "bio01_AnnualMeanTemp", "bio02_MeanDiurnalRange", "bio03_Isothermality",
   "bio04_TempSeasonality", "bio05_MaxTempWarmestMonth", "bio06_MinTempColdestMonth",
@@ -64,7 +55,6 @@ DOWNLOAD_SOURCES <- c(
 # ============================================================================
 # CONFIG SAVE/LOAD HELPERS
 # ============================================================================
-
 save_gui_to_config_shiny <- function(input) {
   cfg <- ConfigManager$current
   
@@ -73,18 +63,18 @@ save_gui_to_config_shiny <- function(input) {
   cfg$species$species_manual <- if (is.null(input$species_manual)) character(0) else input$species_manual
   cfg$species$species_list   <- unique(c(cfg$species$species_auto, cfg$species$species_manual))
   cfg$species$download_mode  <- input$species_dl_mode
-  cfg$species$use_raw_gbif   <- TRUE   # Mandatory now
-  cfg$species$trim_occurrences <- TRUE # Mandatory now
+  cfg$species$use_raw_gbif   <- TRUE
+  cfg$species$trim_occurrences <- TRUE
   cfg$species$use_iucn_range <- input$use_iucn_range
   
-  # Data sources - multi-select tags
+  # Data sources
   selected_sources <- if (is.null(input$dl_sources)) character(0) else input$dl_sources
   cfg$data_sources$download_worldclim <- "worldclim" %in% selected_sources
   cfg$data_sources$download_spectre   <- "spectre"   %in% selected_sources
   cfg$data_sources$download_landcover <- "landcover" %in% selected_sources
   cfg$data_sources$download_footprint <- "footprint" %in% selected_sources
   cfg$data_sources$use_custom_layers  <- "custom"    %in% selected_sources
-  cfg$data_sources$download_gbif      <- TRUE  # Always on; species list controls behavior
+  cfg$data_sources$download_gbif      <- TRUE
   cfg$data_sources$extract_iucn_range <- input$use_iucn_range
   cfg$data_sources$override_existing  <- input$override_downloads
   cfg$data_sources$active_layer_dirs  <- if (is.null(input$active_layers)) character(0) else input$active_layers
@@ -136,18 +126,21 @@ save_gui_to_config_shiny <- function(input) {
   
   # Final model
   cfg$final_model$replicates     <- as.integer(input$replicates)
-  cfg$final_model$replicate_type <- "crossvalidate"  # Hardcoded
+  cfg$final_model$replicate_type <- "crossvalidate"
   
-  # Advanced - required bioclim vars (selectize returns a character vector)
+  # Advanced
   cfg$advanced$required_bioclim <-
     if (is.null(input$required_bioclim)) character(0) else input$required_bioclim
-  cfg$advanced$java_memory_mb       <- as.integer(input$java_memory)
-  cfg$advanced$skip_existing_models <- input$skip_existing
+  cfg$advanced$java_memory_mb        <- as.integer(input$java_memory)
+  cfg$advanced$skip_existing_models  <- input$skip_existing
+  cfg$advanced$skip_global_if_exists <- isTRUE(input$skip_global_if_exists)
+  cfg$advanced$reuse_clipped_layers  <- isTRUE(input$reuse_clipped_layers)
+  cfg$advanced$reuse_clipped_mask    <- isTRUE(input$reuse_clipped_mask)
   
   # Cleanup
   cfg$cleanup$keep_clipped_layers <- input$keep_clipped_layers
   cfg$cleanup$keep_clipped_mask   <- input$keep_clipped_mask
-  cfg$cleanup$use_shp <- TRUE  # Always on, controlled by extent strategy now
+  cfg$cleanup$use_shp <- TRUE
   
   ConfigManager$current <- cfg
   ConfigManager$save()
@@ -157,12 +150,11 @@ save_gui_to_config_shiny <- function(input) {
 load_gui_from_config_shiny <- function(session) {
   cfg <- ConfigManager$current
   
-  # Species - split into auto/manual
+  # Species
   sp_auto   <- if (!is.null(cfg$species$species_auto))   cfg$species$species_auto   else character(0)
   sp_manual <- if (!is.null(cfg$species$species_manual)) cfg$species$species_manual else character(0)
   
-  # Legacy: if no split, treat all as auto
-  if (length(sp_auto) == 0 && length(sp_manual) == 0 && 
+  if (length(sp_auto) == 0 && length(sp_manual) == 0 &&
       length(cfg$species$species_list) > 0) {
     sp_auto <- cfg$species$species_list
   }
@@ -174,10 +166,10 @@ load_gui_from_config_shiny <- function(session) {
   updateSelectInput(session, "species_dl_mode", selected = dl_mode)
   
   updateCheckboxInput(session, "use_iucn_range",
-                      value = if (!is.null(cfg$species$use_iucn_range)) 
+                      value = if (!is.null(cfg$species$use_iucn_range))
                         cfg$species$use_iucn_range else cfg$data_sources$extract_iucn_range)
   
-  # Data sources - rebuild multi-select
+  # Data sources
   selected_sources <- character(0)
   if (isTRUE(cfg$data_sources$download_worldclim)) selected_sources <- c(selected_sources, "worldclim")
   if (isTRUE(cfg$data_sources$download_spectre))   selected_sources <- c(selected_sources, "spectre")
@@ -208,7 +200,7 @@ load_gui_from_config_shiny <- function(session) {
   updateSelectInput(session, "res_mode",  selected = cfg$resolution$mode)
   updateNumericInput(session, "target_res", value = cfg$resolution$target_arcmin)
   updateCheckboxInput(session, "auto_align",
-                      value = if (!is.null(cfg$resolution$auto_align)) 
+                      value = if (!is.null(cfg$resolution$auto_align))
                         cfg$resolution$auto_align else TRUE)
   
   # Extent
@@ -243,7 +235,7 @@ load_gui_from_config_shiny <- function(session) {
   # Final
   updateNumericInput(session, "replicates", value = cfg$final_model$replicates)
   
-  # Advanced (moved required vars)
+  # Advanced
   req_bio <- if (!is.null(cfg$advanced$required_bioclim)) cfg$advanced$required_bioclim
   else if (!is.null(cfg$advanced$required_tifs)) cfg$advanced$required_tifs
   else character(0)
@@ -251,6 +243,12 @@ load_gui_from_config_shiny <- function(session) {
   
   updateNumericInput(session, "java_memory", value = cfg$advanced$java_memory_mb)
   updateCheckboxInput(session, "skip_existing", value = cfg$advanced$skip_existing_models)
+  updateCheckboxInput(session, "skip_global_if_exists",
+                      value = isTRUE(cfg$advanced$skip_global_if_exists))
+  updateCheckboxInput(session, "reuse_clipped_layers",
+                      value = isTRUE(cfg$advanced$reuse_clipped_layers))
+  updateCheckboxInput(session, "reuse_clipped_mask",
+                      value = isTRUE(cfg$advanced$reuse_clipped_mask))
   
   # Cleanup
   updateCheckboxInput(session, "keep_clipped_layers", value = cfg$cleanup$keep_clipped_layers)
@@ -260,7 +258,6 @@ load_gui_from_config_shiny <- function(session) {
 # ============================================================================
 # STYLES
 # ============================================================================
-
 mini_style_css <- "
 html, body {
   height: 100%;
@@ -381,7 +378,6 @@ html, body {
 # ============================================================================
 # UI
 # ============================================================================
-
 ui <- fluidPage(
   useShinyjs(),
   tags$head(
@@ -392,14 +388,12 @@ ui <- fluidPage(
   
   div(class = "gadget-container",
       
-      # ===== Title bar =====
       div(class = "gadget-title-bar",
           actionButton("cancel", "Cancel", class = "btn-default btn-sm"),
           h4("ARMI - Automated R Maxent Integration"),
           actionButton("done", "Process", class = "btn-primary btn-sm")
       ),
       
-      # ===== Tab strip =====
       div(class = "nav-tabs-custom",
           actionLink("tab_data",     HTML('<i class="fa fa-database"></i>Data'),       class = "nav-link active"),
           actionLink("tab_species",  HTML('<i class="fa fa-paw"></i>Species'),         class = "nav-link"),
@@ -410,7 +404,6 @@ ui <- fluidPage(
           actionLink("tab_config",   HTML('<i class="fa fa-save"></i>Config'),         class = "nav-link")
       ),
       
-      # ===== Content =====
       div(class = "gadget-content",
           div(class = "tab-content",
               
@@ -418,7 +411,7 @@ ui <- fluidPage(
               div(class = "tab-pane active", id = "pane_data",
                   
                   h4("Environmental Layer Sources"),
-                  selectizeInput("dl_sources", 
+                  selectizeInput("dl_sources",
                                  "Layers to download:",
                                  choices = DOWNLOAD_SOURCES,
                                  selected = "worldclim",
@@ -476,7 +469,7 @@ ui <- fluidPage(
                     )
                   ),
                   
-                  checkboxInput("auto_align", 
+                  checkboxInput("auto_align",
                                 HTML("<b>Automatically align rasters</b> &mdash; resamples all rasters to a common grid"),
                                 value = TRUE),
                   div(class = "help-text",
@@ -640,14 +633,14 @@ ui <- fluidPage(
                     div(class = "disclaimer",
                         icon("info-circle"), " ",
                         "Each species' MaxEnt model will use its IUCN range polygon as the ",
-                        "clipping boundary. Requires IUCN data in ", 
+                        "clipping boundary. Requires IUCN data in ",
                         tags$code("SHP/IUCN/"), ".")
                   ),
                   
                   hr(),
                   
                   h4("Projection Mask"),
-                  checkboxInput("use_mask", 
+                  checkboxInput("use_mask",
                                 "Use separate mask for projection extent", FALSE),
                   conditionalPanel(
                     condition = "input.use_mask == true",
@@ -759,14 +752,30 @@ ui <- fluidPage(
                   fluidRow(
                     column(6, numericInput("java_memory", "Java heap size (MB):",
                                            2048, min = 512, step = 512)),
-                    column(6, checkboxInput("skip_existing", 
+                    column(6, checkboxInput("skip_existing",
                                             "Skip models already completed", TRUE))
                   ),
                   hr(),
+                  
+                  h4("Reuse Existing Outputs"),
+                  div(class = "help-text",
+                      "Skip expensive steps if their outputs already exist on disk. ",
+                      "Useful when iterating on later steps without rerunning early ones."),
+                  checkboxInput("skip_global_if_exists",
+                                "Skip global model rerun if Models/Global/maxentResults.csv exists",
+                                value = FALSE),
+                  checkboxInput("reuse_clipped_layers",
+                                "Reuse existing ClippedLayers/ (skip Step 4 raster clipping)",
+                                value = FALSE),
+                  checkboxInput("reuse_clipped_mask",
+                                "Reuse existing ClippedMask/ (skip mask clipping)",
+                                value = FALSE),
+                  hr(),
+                  
                   h4("Cleanup"),
-                  checkboxInput("keep_clipped_layers", 
+                  checkboxInput("keep_clipped_layers",
                                 "Keep ClippedLayers/ folder after completion", TRUE),
-                  checkboxInput("keep_clipped_mask", 
+                  checkboxInput("keep_clipped_mask",
                                 "Keep ClippedMask/ folder after completion", TRUE),
                   div(class = "help-text",
                       "Disable to save disk space on multi-species runs."),
@@ -784,7 +793,7 @@ ui <- fluidPage(
                                icon = icon("save"), width = "100%",
                                class = "btn-primary"),
                   br(), br(),
-                  fileInput("cfg_file", "Load config from JSON file:", 
+                  fileInput("cfg_file", "Load config from JSON file:",
                             accept = ".json"),
                   actionButton("reset_cfg", "Reset to Factory Defaults",
                                icon = icon("undo"), width = "100%",
@@ -796,14 +805,12 @@ ui <- fluidPage(
           )
       ),
       
-      # ===== Status / Progress bar =====
       div(class = "status-bar",
           div(textOutput("progress_label", inline = TRUE)),
           tags$progress(id = "progbar", value = "0", max = "14")
       )
   ),
   
-  # JavaScript for tab switching and progress
   tags$script(HTML("
     $(document).on('click', '.nav-link', function(e) {
       e.preventDefault();
@@ -832,10 +839,8 @@ ui <- fluidPage(
 # ============================================================================
 # SERVER
 # ============================================================================
-
 server <- function(input, output, session) {
   
-  # ===== Initialize selectize choices on startup =====
   observe({
     updateSelectizeInput(session, "active_layers",
                          choices = discover_downloaded_layers(),
@@ -851,14 +856,12 @@ server <- function(input, output, session) {
       type = "message", duration = 3)
   })
   
-  # ===== Initialize from config =====
   observe({
     if (!is.null(ConfigManager$current)) {
       load_gui_from_config_shiny(session)
     }
   })
   
-  # ===== Override existing downloads button =====
   observeEvent(input$override_btn, {
     showModal(modalDialog(
       tagList(
@@ -881,7 +884,6 @@ server <- function(input, output, session) {
                      type = "warning", duration = 6)
   })
   
-  # ===== Progress =====
   progress_state <- reactiveValues(step = 0, name = "Ready")
   
   output$progress_label <- renderText({
@@ -895,7 +897,6 @@ server <- function(input, output, session) {
     session$sendCustomMessage("setProg", list(val = step))
   }
   
-  # ===== Maps (extent + mask) =====
   if (HAS_LEAFLET) {
     output$extent_map <- renderLeaflet({
       leaflet() %>%
@@ -925,7 +926,7 @@ server <- function(input, output, session) {
     
     observe({
       req(input$use_mask)
-      req(input$mask_min_lat, input$mask_max_lat, 
+      req(input$mask_min_lat, input$mask_max_lat,
           input$mask_min_lon, input$mask_max_lon)
       
       leafletProxy("mask_map") %>%
@@ -938,10 +939,9 @@ server <- function(input, output, session) {
         )
     })
   } else {
-    # Fallback to base R plot if leaflet unavailable
     output$extent_map_static <- renderPlot({
       req(input$clipping_strategy == "manual_bbox")
-      plot(c(-180, 180), c(-90, 90), type = "n", 
+      plot(c(-180, 180), c(-90, 90), type = "n",
            xlab = "Longitude", ylab = "Latitude",
            main = "Manual Bounding Box (install 'leaflet' for interactive map)")
       rect(-180, -90, 180, 90, col = "lightgray", border = "gray")
@@ -952,18 +952,17 @@ server <- function(input, output, session) {
     
     output$mask_map_static <- renderPlot({
       req(input$use_mask)
-      plot(c(-180, 180), c(-90, 90), type = "n", 
+      plot(c(-180, 180), c(-90, 90), type = "n",
            xlab = "Longitude", ylab = "Latitude",
            main = "Projection Mask")
       rect(-180, -90, 180, 90, col = "lightgray", border = "gray")
       abline(h = 0, v = 0, col = "white")
-      rect(input$mask_min_lon, input$mask_min_lat, 
+      rect(input$mask_min_lon, input$mask_min_lat,
            input$mask_max_lon, input$mask_max_lat,
            col = rgb(0, 0, 1, 0.3), border = "blue", lwd = 2)
     })
   }
   
-  # ===== Step selection buttons =====
   all_steps <- c("step0","step1","step3","step4","step6",
                  "step7","step8","step9","step10",
                  "step11","step12","step13")
@@ -980,7 +979,6 @@ server <- function(input, output, session) {
     updateCheckboxGroupInput(session, "steps", selected = inverted)
   })
   
-  # ===== Config save/load/reset =====
   observeEvent(input$save_cfg, {
     tryCatch({
       save_gui_to_config_shiny(input)
@@ -1022,7 +1020,6 @@ server <- function(input, output, session) {
     showNotification("Reset to factory defaults", type = "warning")
   })
   
-  # ===== Diagnostic info =====
   output$diag_info <- renderText({
     paste0(
       "R version:    ", R.version.string, "\n",
@@ -1038,9 +1035,7 @@ server <- function(input, output, session) {
     else "(not loaded)"
   })
   
-  # ===== Process button =====
   observeEvent(input$done, {
-    # Gather species from both lists
     sp_auto   <- if (is.null(input$species_auto))   character(0) else input$species_auto
     sp_manual <- if (is.null(input$species_manual)) character(0) else input$species_manual
     
@@ -1110,7 +1105,6 @@ server <- function(input, output, session) {
       selected_sources <- input$dl_sources %||% character(0)
       cat("=== [2/4] Building workflow config ===\n"); flush.console()
       config <- WorkflowConfiguration()
-
       
       config$step0 <- StepConfig$Step0Config(
         enabled            = has_step("step0"),
@@ -1136,11 +1130,16 @@ server <- function(input, output, session) {
         mask_max_lat = if (isTRUE(input$use_mask)) input$mask_max_lat else NA,
         mask_max_lon = if (isTRUE(input$use_mask)) input$mask_max_lon else NA,
         mask_min_lat = if (isTRUE(input$use_mask)) input$mask_min_lat else NA,
-        mask_min_lon = if (isTRUE(input$use_mask)) input$mask_min_lon else NA
+        mask_min_lon = if (isTRUE(input$use_mask)) input$mask_min_lon else NA,
+        reuse_existing_layers = isTRUE(input$reuse_clipped_layers),
+        reuse_existing_mask   = isTRUE(input$reuse_clipped_mask)
       )
       
       config$step3 <- StepConfig$Step3Config(enabled = has_step("step3"))
-      config$step6 <- StepConfig$Step6Config(enabled = has_step("step6"))
+      config$step6 <- StepConfig$Step6Config(
+        enabled = has_step("step6"),
+        skip_if_exists = isTRUE(input$skip_global_if_exists)
+      )
       config$step7 <- StepConfig$Step7Config(
         enabled = has_step("step7"),
         threshold = as.numeric(input$var_imp %||% 0.05),
@@ -1231,8 +1230,6 @@ server <- function(input, output, session) {
 create_maxent_gui <- function() {
   app <- shinyApp(ui, server)
   
-  # runGadget opens the app in a dedicated RStudio window/pane
-  # instead of the default browser.
   viewer <- shiny::dialogViewer(
     dialogName = "ARMI - Automated R Maxent Integration",
     width  = 1200,

@@ -6,10 +6,10 @@
     "maxent_jar": "bin/maxent.jar"
   },
   "species": {
-    "species_list": "Varanus exanthematicus",
+    "species_list": "Eleutherodactylus planirostris",
     "use_raw_gbif": true,
     "trim_occurrences": true,
-    "species_auto": "Varanus exanthematicus",
+    "species_auto": "Eleutherodactylus planirostris",
     "species_manual": [],
     "download_mode": "automatic",
     "use_iucn_range": true
@@ -53,7 +53,7 @@
     "max_lat": 50
   },
   "model_parameters": {
-    "perm_importance_threshold": 0.05,
+    "perm_importance_threshold": 0.02,
     "top_variable_count": 10,
     "correlation_threshold": 0.8,
     "selection_criterion": "AICc",
@@ -94,6 +94,9 @@
     "java_memory_mb": 2048,
     "skip_existing_models": true,
     "required_tifs": [],
-    "required_bioclim": []
+    "required_bioclim": [],
+    "skip_global_if_exists": true,
+    "reuse_clipped_layers": true,
+    "reuse_clipped_mask": true
   }
 }

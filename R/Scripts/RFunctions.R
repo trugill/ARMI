@@ -468,54 +468,163 @@ RFunctions$clipToShp <- function(points_path = NULL, shape_path, output_path = N
 # =============================================================================
 
 # ---- Read a points CSV and detect lat/lon columns -----------------------------
+# ---- Read a points CSV and detect lat/lon columns -----------------------------
 RFunctions$read_points_csv <- function(infile, verbose = TRUE) {
-  lines <- readLines(infile, warn = FALSE)
+  
+  # Read as raw bytes so we can detect and strip a UTF-8 BOM cleanly.
+  # write.csv() on Windows sometimes writes one; if present, the first
+  # column name becomes literally "\ufefflatitude" and every regex/name
+  # match against "latitude" silently fails.
+  fsize <- file.info(infile)$size
+  con <- file(infile, "rb")
+  raw_all <- readBin(con, "raw", n = fsize)
+  close(con)
+  
+  if (length(raw_all) >= 3 &&
+      raw_all[1] == as.raw(0xEF) &&
+      raw_all[2] == as.raw(0xBB) &&
+      raw_all[3] == as.raw(0xBF)) {
+    raw_all <- raw_all[-(1:3)]
+    if (verbose) message("  Stripped UTF-8 BOM from CSV")
+  }
+  
+  # Normalize line endings and split
+  text <- rawToChar(raw_all)
+  text <- gsub("\r\n", "\n", text, fixed = TRUE)
+  text <- gsub("\r",   "\n", text, fixed = TRUE)
+  lines <- strsplit(text, "\n", fixed = TRUE)[[1]]
+  
   if (length(lines) < 2) {
     stop(sprintf("CSV has fewer than 2 lines: %s", infile))
   }
   
   header <- trimws(lines[1])
   header_fields <- strsplit(header, ",", fixed = TRUE)[[1]]
-  header_fields_clean <- trimws(tolower(header_fields))
   
-  lat_idx <- which(grepl("^lat", header_fields_clean))[1]
-  lon_idx <- which(grepl("^lon", header_fields_clean))[1]
-  
-  if (is.na(lat_idx) || is.na(lon_idx)) {
-    if (length(header_fields) >= 3) {
-      lon_idx <- 2L; lat_idx <- 3L
-      if (verbose) message("  WARNING: lat/lon not found by name; ",
-                           "assuming Maxent default (col2=lon, col3=lat)")
-    } else if (length(header_fields) == 2) {
-      lat_idx <- 1L; lon_idx <- 2L
-      if (verbose) message("  WARNING: lat/lon not detected; assuming (col1=lat, col2=lon)")
-    } else {
-      stop("Cannot determine lat/lon columns in CSV")
-    }
+  # Aggressive cleaning: whitespace, surrounding quotes, non-alphanumeric junk
+  clean_name <- function(x) {
+    x <- trimws(x)
+    x <- gsub('^["\']+|["\']+$', "", x)
+    x <- gsub("[^A-Za-z0-9_]", "", x)
+    tolower(x)
   }
-  
-  has_species <- (length(header_fields) >= 3) &&
-    !(1 %in% c(lat_idx, lon_idx))
-  
-  rows <- vector("list", length(lines) - 1)
-  keep <- logical(length(lines) - 1)
-  for (i in seq_along(rows)) {
-    ln <- trimws(lines[i + 1], which = "right")
-    if (nchar(ln) == 0) { keep[i] <- FALSE; next }
-    fields <- strsplit(ln, ",", fixed = TRUE)[[1]]
-    if (length(fields) < max(lat_idx, lon_idx)) { keep[i] <- FALSE; next }
-    rows[[i]] <- trimws(fields)
-    keep[i] <- TRUE
-  }
-  rows <- rows[keep]
+  header_fields_clean <- vapply(header_fields, clean_name, character(1))
   
   if (verbose) {
     message(sprintf("  CSV: %d columns [%s]",
                     length(header_fields),
                     paste(header_fields, collapse = ", ")))
-    message(sprintf("  Detected: lat_idx=%d, lon_idx=%d, has_species=%s",
-                    lat_idx, lon_idx, has_species))
-    message(sprintf("  Loaded %d data rows", length(rows)))
+    message(sprintf("  Cleaned:         [%s]",
+                    paste(header_fields_clean, collapse = ", ")))
+  }
+  
+  # ---- Name-based detection ----
+  lat_idx <- NA_integer_
+  lon_idx <- NA_integer_
+  
+  exact_lat <- which(header_fields_clean %in%
+                       c("latitude", "lat", "decimallatitude", "y"))
+  exact_lon <- which(header_fields_clean %in%
+                       c("longitude", "lon", "long", "decimallongitude", "x"))
+  if (length(exact_lat) > 0) lat_idx <- exact_lat[1]
+  if (length(exact_lon) > 0) lon_idx <- exact_lon[1]
+  
+  if (is.na(lat_idx)) {
+    p <- which(grepl("^lat", header_fields_clean))
+    if (length(p) > 0) lat_idx <- p[1]
+  }
+  if (is.na(lon_idx)) {
+    p <- which(grepl("^lon", header_fields_clean))
+    if (length(p) > 0) lon_idx <- p[1]
+  }
+  
+  # ---- Parse data rows ----
+  raw_rows <- vector("list", length(lines) - 1)
+  keep <- logical(length(lines) - 1)
+  for (i in seq_along(raw_rows)) {
+    ln <- trimws(lines[i + 1], which = "right")
+    if (nchar(ln) == 0) { keep[i] <- FALSE; next }
+    fields <- strsplit(ln, ",", fixed = TRUE)[[1]]
+    fields <- trimws(fields)
+    fields <- gsub('^["\']+|["\']+$', "", fields)
+    raw_rows[[i]] <- fields
+    keep[i] <- TRUE
+  }
+  raw_rows <- raw_rows[keep]
+  
+  if (length(raw_rows) == 0) {
+    stop("CSV has no data rows: ", infile)
+  }
+  
+  # ---- Value-plausibility fallback (used if name detection failed) ----
+  #
+  # Latitude is always in [-90, 90]; longitude is in [-180, 180]. A column
+  # containing any value with |v|>90 CANNOT be latitude. This catches the
+  # (species, lat, lon) vs (species, lon, lat) ambiguity that the old code
+  # was hard-coding to the wrong choice.
+  ncol_data <- length(raw_rows[[1]])
+  n_check <- min(50, length(raw_rows))
+  plausible_lat <- integer(ncol_data)
+  plausible_lon <- integer(ncol_data)
+  for (i in seq_len(ncol_data)) {
+    for (j in seq_len(n_check)) {
+      if (i > length(raw_rows[[j]])) next
+      v <- suppressWarnings(as.numeric(raw_rows[[j]][i]))
+      if (is.na(v)) next
+      if (abs(v) <= 90)  plausible_lat[i] <- plausible_lat[i] + 1
+      if (abs(v) <= 180) plausible_lon[i] <- plausible_lon[i] + 1
+    }
+  }
+  
+  if (is.na(lat_idx) || is.na(lon_idx)) {
+    if (verbose) {
+      message("  WARNING: lat/lon not detected by name -- probing values")
+      for (i in seq_len(ncol_data)) {
+        message(sprintf("    col %d: %d/%d in [-90,90], %d/%d in [-180,180]",
+                        i, plausible_lat[i], n_check,
+                        plausible_lon[i], n_check))
+      }
+    }
+    
+    # lon: highest plausible_lon, prefer cols that have OOB-for-lat values
+    lon_cands <- order(-plausible_lon, plausible_lat)
+    lat_cands <- order(-plausible_lat, -plausible_lon)
+    
+    if (is.na(lon_idx)) lon_idx <- lon_cands[1]
+    if (is.na(lat_idx)) {
+      for (c in lat_cands) if (c != lon_idx) { lat_idx <- c; break }
+    }
+    
+    if (verbose) {
+      message(sprintf("  Value-probe result: lat_idx=%d, lon_idx=%d",
+                      lat_idx, lon_idx))
+    }
+  }
+  
+  # ---- Sanity check: if lat_idx has values outside [-90,90], SWAP ----
+  if (plausible_lat[lat_idx] < n_check * 0.9 &&
+      plausible_lat[lon_idx] >= n_check * 0.9) {
+    if (verbose) {
+      message(sprintf(
+        "  !! Detected column swap: lat_idx=%d has %d/%d valid lats, ",
+        lat_idx, plausible_lat[lat_idx], n_check),
+        sprintf("but col %d has %d/%d. Swapping.",
+                lon_idx, plausible_lat[lon_idx], n_check))
+    }
+    tmp <- lat_idx; lat_idx <- lon_idx; lon_idx <- tmp
+  }
+  
+  has_species <- (length(header_fields) >= 3) &&
+    !(1 %in% c(lat_idx, lon_idx))
+  
+  if (verbose) {
+    lat_name <- if (lat_idx <= length(header_fields_clean))
+      header_fields_clean[lat_idx] else "?"
+    lon_name <- if (lon_idx <= length(header_fields_clean))
+      header_fields_clean[lon_idx] else "?"
+    message(sprintf("  Detected: lat_idx=%d (%s), lon_idx=%d (%s), has_species=%s",
+                    lat_idx, lat_name, lon_idx, lon_name, has_species))
+    message(sprintf("  Loaded %d data rows", length(raw_rows)))
   }
   
   list(
@@ -523,7 +632,7 @@ RFunctions$read_points_csv <- function(infile, verbose = TRUE) {
     has_species = has_species,
     lat_idx     = lat_idx,
     lon_idx     = lon_idx,
-    rows        = rows
+    rows        = raw_rows
   )
 }
 

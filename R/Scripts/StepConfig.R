@@ -1,7 +1,6 @@
 # =============================================================================
 # StepConfig.R - Per-step configuration constructors
 # =============================================================================
-
 StepConfig <- new.env()
 
 # --- Step 0: Data download ---------------------------------------------------
@@ -56,7 +55,9 @@ StepConfig$Step4Config <- function(enabled = TRUE,
                                    min_lat = NA, min_lon = NA,
                                    use_mask = FALSE,
                                    mask_max_lat = NA, mask_max_lon = NA,
-                                   mask_min_lat = NA, mask_min_lon = NA) {
+                                   mask_min_lat = NA, mask_min_lon = NA,
+                                   reuse_existing_layers = FALSE,
+                                   reuse_existing_mask = FALSE) {
   list(
     type = "Step4Config",
     enabled = enabled,
@@ -65,13 +66,22 @@ StepConfig$Step4Config <- function(enabled = TRUE,
     min_lat = min_lat, min_lon = min_lon,
     use_mask = use_mask,
     mask_max_lat = mask_max_lat, mask_max_lon = mask_max_lon,
-    mask_min_lat = mask_min_lat, mask_min_lon = mask_min_lon
+    mask_min_lat = mask_min_lat, mask_min_lon = mask_min_lon,
+    reuse_existing_layers = reuse_existing_layers,
+    reuse_existing_mask = reuse_existing_mask
   )
 }
 
 # --- Step 6: Global Maxent model ---------------------------------------------
-StepConfig$Step6Config <- function(enabled = TRUE, extra_args = character(0)) {
-  list(type = "Step6Config", enabled = enabled, extra_args = extra_args)
+StepConfig$Step6Config <- function(enabled = TRUE,
+                                   extra_args = character(0),
+                                   skip_if_exists = FALSE) {
+  list(
+    type = "Step6Config",
+    enabled = enabled,
+    extra_args = extra_args,
+    skip_if_exists = skip_if_exists
+  )
 }
 
 # --- Step 7: Top variables ---------------------------------------------------
